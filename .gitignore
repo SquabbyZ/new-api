@@ -44,3 +44,38 @@ relaykit/relayconvert/chat_responses_live_local_test.go
 service/openaicompat/chat_responses_live_local_test.go
 go.work
 go.work.sum
+
+# Peaks-Loop per-session working artifacts. Reviewable but not shippable:
+# PRD/RD/QA capsules, handoff, fresh-context and codegraph context are keyed by
+# session id and regenerated per session. Durable project facts they carry are
+# sedimented into .peaks/memory/ (committed) instead.
+.peaks/_runtime/
+
+# >>> peaks-loop managed snippet (slice 2.0.1-bug3) — do not edit by hand
+# Consumer-project .claude/settings.local.json: written by `peaks workspace init`
+# to bypass Claude Code [Fact-Forcing Gate] for .peaks/** writes. Local-only.
+.claude/settings.local.json
+# Offline template copy (.peaks/.claude-settings-template.json): written by
+# `peaks workspace init` as a manual-recovery anchor. The source-of-truth is
+# peaks-loop's own `buildClaudeSettingsLocalJson()` — NOT this committed copy.
+# Gitignored so the init flow's drift-driven refresh does not show up as
+# "modified" in `git status` on every release bump. Recovery path: re-run
+# `peaks workspace init` to regenerate; or copy from peaks-loop source.
+# Both patterns below are PROJECT-ROOT-relative, so this snippet must land
+# in the root .gitignore — see `upsertPeaksGitignoreSnippet`.
+.peaks/.claude-settings-template.json
+# Codegraph rollback copy (A3, 2026-09-17). Every `peaks codegraph init` /
+# `repair-exclude` / `repair-index` / pre-dispatch preflight / post-slice
+# auto-refresh copies `.codegraph/config.json` here before rewriting it, so
+# this file is LOCAL CHURN: a committed one is silently replaced by the next
+# repair. Upstream's own `.codegraph/.gitignore` does not cover it (it names
+# *.db / *.db-wal / *.db-shm, cache/, *.log and .dirty only) and `.codegraph/`
+# is NOT ignored wholesale downstream, so without this line a consumer project
+# commits a file peaks-loop rewrites under it.
+#
+# ONLY the backup, never `config.json` itself: upstream deliberately keeps
+# that config committable (it is a project's include/exclude policy, and
+# committing it is how a team shares it), so ignoring it would hide a file
+# people mean to commit. A rollback copy is the opposite kind of file.
+.codegraph/config.json.bak
+# <<< peaks-loop managed snippet
