@@ -91,7 +91,7 @@ func TestDeleteOldLogBatchDatabaseMatrix(t *testing.T) {
 				t.Skip(tc.env + " is not configured")
 			}
 			recorder := &sqlRecorder{}
-			db := openLogCleanupTestDB(t, tc.name, dsn, recorder)
+			db := openLogTestDB(t, tc.name, dsn, recorder)
 			LOG_DB = db
 			common.SetDatabaseTypes(previousMain, tc.typ)
 
@@ -161,7 +161,9 @@ func TestDeleteOldLogBatchDatabaseMatrix(t *testing.T) {
 	}
 }
 
-func openLogCleanupTestDB(t *testing.T, dialect string, dsn string, recorder *sqlRecorder) *gorm.DB {
+// openLogTestDB opens one engine with a fresh `logs` table and a logger that
+// records every statement it executes.
+func openLogTestDB(t *testing.T, dialect string, dsn string, recorder *sqlRecorder) *gorm.DB {
 	t.Helper()
 	var dialector gorm.Dialector
 	switch dialect {

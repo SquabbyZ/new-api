@@ -611,6 +611,36 @@ type Stat struct {
 	Tpm   int `json:"tpm"`
 }
 
+// logStatWindowSeconds bounds the fallback time window of the dashboard log
+// statistics. `quota`, `prompt_tokens` and `completion_tokens` are not part of
+// any index on `logs`, so an aggregate with no lower `created_at` bound cannot
+// be answered from an index and degrades into a full-table scan plus a row
+// lookup per row. 30 days is chosen to cover the widest range the usage
+// dashboard offers (1 / 7 / 14 / 29 days), so every standard view keeps its
+// exact numbers while the scan stays bounded.
+const logStatWindowSeconds int64 = 30 * 24 * 60 * 60
+
+// statWindowStart returns the lower `created_at` bound for the log statistics.
+// A lower bound the caller states is honoured unchanged. When the caller states
+// none, the window is anchored to the caller's own upper bound, so a request
+// that only sets end_timestamp still selects the period it asked for, and to
+// "now" when there is no upper bound either.
+//
+// Anything that cannot anchor a window — absent, zero, negative, or shorter
+// than the window itself — is treated as no anchor, which is what keeps the
+// fallback from ever yielding a non-positive bound: `created_at >= -1` selects
+// every row and would otherwise defeat the window through one parameter.
+func statWindowStart(startTimestamp int64, endTimestamp int64) int64 {
+	if startTimestamp > 0 {
+		return startTimestamp
+	}
+	anchor := endTimestamp
+	if anchor <= logStatWindowSeconds {
+		anchor = time.Now().Unix()
+	}
+	return anchor - logStatWindowSeconds
+}
+
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
 
@@ -627,9 +657,7 @@ func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelNa
 		tx = tx.Where("token_name = ?", tokenName)
 		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
 	}
-	if startTimestamp != 0 {
-		tx = tx.Where("created_at >= ?", startTimestamp)
-	}
+	tx = tx.Where("created_at >= ?", statWindowStart(startTimestamp, endTimestamp))
 	if endTimestamp != 0 {
 		tx = tx.Where("created_at <= ?", endTimestamp)
 	}
@@ -681,9 +709,7 @@ func SumUsedToken(logType int, startTimestamp int64, endTimestamp int64, modelNa
 	if tokenName != "" {
 		tx = tx.Where("token_name = ?", tokenName)
 	}
-	if startTimestamp != 0 {
-		tx = tx.Where("created_at >= ?", startTimestamp)
-	}
+	tx = tx.Where("created_at >= ?", statWindowStart(startTimestamp, endTimestamp))
 	if endTimestamp != 0 {
 		tx = tx.Where("created_at <= ?", endTimestamp)
 	}
