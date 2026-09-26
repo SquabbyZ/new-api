@@ -1,6 +1,7 @@
 package model
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -105,27 +106,45 @@ func SaveQuotaDataCache() {
 	// 1. 先查询数据库中是否有数据
 	// 2. 如果有数据，就更新数据
 	// 3. 如果没有数据，就插入数据
-	for _, quotaData := range CacheQuotaData {
+	failed := 0
+	for key, quotaData := range CacheQuotaData {
 		quotaDataDB := &QuotaData{}
-		DB.Table("quota_data").
+		lookupErr := DB.Table("quota_data").
 			Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
 				quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
-			First(quotaDataDB)
-		if quotaDataDB.Id > 0 {
+			First(quotaDataDB).Error
+		var err error
+		if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+			// 探测本身失败（连接中断、超时等）时无法判断该键是否已有行；若继续走 Create，
+			// 会给一个已存在的键插入重复行，看板把它当成两笔数据重复计数。探测失败与
+			// 「记录不存在」必须分开：只有后者才是新键的合法插入路径，探测失败按失败处理，
+			// 键留在缓存里等下次刷写。
+			err = lookupErr
+		} else if quotaDataDB.Id > 0 {
 			//quotaDataDB.Count += quotaData.Count
 			//quotaDataDB.Quota += quotaData.Quota
 			//DB.Table("quota_data").Save(quotaDataDB)
-			increaseQuotaData(quotaData)
+			err = increaseQuotaData(quotaData)
 		} else {
-			DB.Table("quota_data").Create(quotaData)
+			err = DB.Table("quota_data").Create(quotaData).Error
 		}
+		// 写入失败的键保留在缓存中，等待下次刷写；只有成功落库的键才移除，
+		// 否则这一轮累积的看板数据会随缓存清空一起丢失。
+		if err != nil {
+			failed++
+			common.SysError(fmt.Sprintf("保存数据看板数据失败，该条数据保留待下次刷写: user_id=%d model_name=%s created_at=%d err=%s",
+				quotaData.UserID, quotaData.ModelName, quotaData.CreatedAt, err))
+			continue
+		}
+		delete(CacheQuotaData, key)
 	}
-	CacheQuotaData = make(map[string]*QuotaData)
-	common.SysLog(fmt.Sprintf("保存数据看板数据成功，共保存%d条数据", size))
+	if failed == 0 {
+		common.SysLog(fmt.Sprintf("保存数据看板数据成功，共保存%d条数据", size))
+	}
 }
 
-func increaseQuotaData(quotaData *QuotaData) {
-	err := DB.Table("quota_data").
+func increaseQuotaData(quotaData *QuotaData) error {
+	return DB.Table("quota_data").
 		Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
 			quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
 		Updates(map[string]any{
@@ -133,9 +152,6 @@ func increaseQuotaData(quotaData *QuotaData) {
 			"quota":      gorm.Expr("quota + ?", quotaData.Quota),
 			"token_used": gorm.Expr("token_used + ?", quotaData.TokenUsed),
 		}).Error
-	if err != nil {
-		common.SysLog(fmt.Sprintf("increaseQuotaData error: %s", err))
-	}
 }
 
 func GetQuotaDataByUsername(username string, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {
