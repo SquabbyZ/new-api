@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-26T17:52:51.358Z",
+  "updatedAt": "2026-09-26T18:36:20.042Z",
   "hot": {
     "rule": [],
     "decision": [
@@ -15,6 +15,22 @@
     ],
     "feedback": [],
     "convention": [
+      {
+        "name": "db-errors-must-use-sanitizedberror",
+        "kind": "convention",
+        "description": "打印数据库错误应走仓库既有的脱敏层，因为驱动错误会内联数据值；直接打印原始错误功能上正常，但会漏掉该保护。  提供 ，其存在目的正是**驱动错误会内联数据值**。新增任何打印数据库错误的日志时应当使用它，而不是直接  原始 。 本项目...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\db-errors-must-use-sanitizedberror.md",
+        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-job.md",
+        "updatedAt": "2026-09-26"
+      },
+      {
+        "name": "peaks-gate-literal-section-headings",
+        "kind": "convention",
+        "description": "peaks 的过渡门禁按字面标题校验工件，且把「缺小节」报成「缺整份文件」，容易让人往错方向排查。 peaks 的  门禁按**字面标题**校验工件，且把「缺小节」报成「缺文件」——错误信息形如「N artifact(s) missi...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\peaks-gate-literal-section-headings.md",
+        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-job.md",
+        "updatedAt": "2026-09-26"
+      },
       {
         "name": "perf-metrics-batch-pattern-vs-quota-data",
         "kind": "convention",
@@ -43,6 +59,14 @@
         "updatedAt": "2026-09-26"
       },
       {
+        "name": "gorm-unchecked-first-error-silent-duplicate",
+        "kind": "lesson",
+        "description": "GORM 的「先探测后插入」写法若未检查探测调用的错误，瞬时失败会给已存在的键插入重复行且写入成功无声，表现为静默双计。 GORM 的「先  探测、不存在则 」这种 upsert 形态有一个静默陷阱：**若  的错误未被检查**，连接...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\gorm-unchecked-first-error-silent-duplicate.md",
+        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-job.md",
+        "updatedAt": "2026-09-26"
+      },
+      {
         "name": "multi-node-default-master-migration-race",
         "kind": "lesson",
         "description": "多节点部署时若未设置 NODE_TYPE，每个节点都会被视为 master 并在启动时并发执行数据库迁移，可能造成 DDL 锁争用或重复约束。 ： —— **未设置时默认为 master**。而  只在  为假时提前返回，即从节点不跑...",
@@ -56,6 +80,22 @@
         "description": "本项目没有忽略 peaks 的运行时目录。评审产物、handoff 与 RD 工件都会以未跟踪文件出现在 git status，一次 git add 就会把它们提交进去。  写入的 peaks-loop 托管片段只忽略 、、。实测  ...",
         "sourcePath": "D:\\new-api\\.peaks\\memory\\peaks-runtime-gitignore-peaks-code-skill.md",
         "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff.md",
+        "updatedAt": "2026-09-26"
+      },
+      {
+        "name": "reuse-must-check-residual-context",
+        "kind": "lesson",
+        "description": "复用上一轮的提示词、约束或结论时，必须逐条确认哪些对当前目标不适用并显式删除，否则残留上下文会误导下游。 本项目 job 中，编排器把上一 slice 的 QA 派发提示词用  替换 rid 后复用，结果**正文里仍带着上一 slic...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\reuse-must-check-residual-context.md",
+        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-job.md",
+        "updatedAt": "2026-09-26"
+      },
+      {
+        "name": "schema-equivalence-not-file-md5",
+        "kind": "lesson",
+        "description": "判定迁移或 schema 是否等价不能用数据库文件 md5，因为同一二进制重复运行的 md5 本身就不同。 slice  中 QA 发现 SQLite 库文件 md5 在改动前后不同 —— 仅凭此极易误判为「迁移行为被改变」，从而否定...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\schema-equivalence-not-file-md5.md",
+        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-job.md",
         "updatedAt": "2026-09-26"
       }
     ],
