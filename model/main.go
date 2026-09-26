@@ -218,6 +218,7 @@ func InitDB() (err error) {
 		if common.UsingMainDatabase(common.DatabaseTypeMySQL) {
 			//_, _ = sqlDB.Exec("ALTER TABLE channels MODIFY model_mapping TEXT;") // TODO: delete this line when most users have upgraded
 		}
+		warnImplicitMasterMigration()
 		common.SysLog("database migration started")
 		err = migrateDB()
 		return err
@@ -225,6 +226,18 @@ func InitDB() (err error) {
 		common.FatalLog(err)
 	}
 	return err
+}
+
+// warnImplicitMasterMigration reports a node that reached the migration entry
+// point without an explicit NODE_TYPE. common.IsMasterNode treats an unset
+// NODE_TYPE as master, so in a multi-node deployment where the setting was
+// forgotten every node migrates concurrently. This only makes that node
+// identity visible: whether, when and how migrations run is unchanged.
+func warnImplicitMasterMigration() {
+	if os.Getenv("NODE_TYPE") != "" {
+		return
+	}
+	common.SysError("NODE_TYPE is not set, so this node is treated as master and will run database migrations. In a multi-node deployment, set NODE_TYPE=master on exactly one node and NODE_TYPE=slave on the others to avoid concurrent migrations.")
 }
 
 func InitLogDB() (err error) {
