@@ -50,6 +50,9 @@ go.work.sum
 # session id and regenerated per session. Durable project facts they carry are
 # sedimented into .peaks/memory/ (committed) instead.
 .peaks/_runtime/
+# Sub-agent dispatch records + heartbeats + the shared cross-batch channel.
+# Session-scoped coordination state, same rationale as _runtime above.
+.peaks/_sub_agents/
 
 # >>> peaks-loop managed snippet (slice 2.0.1-bug3) — do not edit by hand
 # Consumer-project .claude/settings.local.json: written by `peaks workspace init`
