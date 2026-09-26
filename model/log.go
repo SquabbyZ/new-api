@@ -731,7 +731,28 @@ func DeleteOldLogBatch(ctx context.Context, targetTimestamp int64, limit int) (i
 		return total, nil
 	}
 
-	result := LOG_DB.WithContext(ctx).Where("created_at < ?", targetTimestamp).Limit(limit).Delete(&Log{})
+	// Only the MySQL dialector lists LIMIT among its delete clauses, so
+	// Delete().Limit() is silently unbounded on PostgreSQL and rejected by
+	// SQLite (whose driver is built without SQLITE_ENABLE_UPDATE_DELETE_LIMIT).
+	// Resolve the batch with a key-set select instead and delete exactly those
+	// rows, which behaves identically on all three engines.
+	//
+	// created_at, id is the column order of idx_created_at_id, so the select
+	// stays an index range scan and both engines stop after `limit` rows
+	// instead of scanning the primary key for matches.
+	var ids []int
+	if err := LOG_DB.WithContext(ctx).Model(&Log{}).
+		Where("created_at < ?", targetTimestamp).
+		Order("created_at, id").
+		Limit(limit).
+		Pluck("id", &ids).Error; err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	result := LOG_DB.WithContext(ctx).Where("id IN ?", ids).Delete(&Log{})
 	if nil != result.Error {
 		return 0, result.Error
 	}
