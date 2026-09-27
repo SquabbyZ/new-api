@@ -242,6 +242,11 @@ func main() {
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()
 	}
+	// 关闭 Kafka 日志通道：先 flush+close 生产端（把最后接受的行送进 topic），
+	// 再停消费者（它才看得到这些行），最后刷写内存缓冲。
+	// The consumer stops before model.CloseDB's deferred call, because it writes
+	// through the log database handle.
+	model.StopLogKafka()
 	// 刷写已入队的日志，避免正常关闭丢失缓冲中的日志
 	model.StopLogFlush()
 	common.SysLog("server exited")
@@ -348,6 +353,13 @@ func InitResources() error {
 		return err
 	}
 	model.StartLogFlush()
+
+	// Start the Kafka log transport when KAFKA_BROKERS is set. A broker that is
+	// unreachable is not fatal, but a Kafka-only misconfiguration is, so this
+	// returns an error and the startup below reports it.
+	if err = model.StartLogKafka(); err != nil {
+		return err
+	}
 
 	// Initialize Redis
 	err = common.InitRedisClient()

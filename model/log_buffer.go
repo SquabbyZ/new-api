@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/pkg/logkafka"
 )
 
 // Consume logs used to reach ClickHouse one INSERT at a time, and every
@@ -20,6 +21,10 @@ import (
 // MySQL and PostgreSQL a single-row INSERT is one local round trip that costs a
 // request little and creates no parts, so those deployments keep the existing
 // synchronous, immediately readable write.
+//
+// A deployment that sets KAFKA_BROKERS hands rows to Kafka instead, and this
+// buffer is then the path for a ClickHouse deployment that has not configured
+// Kafka. The two are separate predicates on purpose; see logKafkaEnabled.
 const (
 	// logBufferCapacity bounds the rows held in memory (a row is a few hundred
 	// bytes to a couple of KB, so the ceiling is single-digit MB per node). It
@@ -66,9 +71,25 @@ var (
 	logFlushFailures int
 )
 
+// logKafkaEnabled reports whether the log write path hands rows to Kafka. Its
+// only condition is that KAFKA_BROKERS is set, which the logkafka package
+// answers so the variable is named in exactly one place.
+//
+// This has to be its own predicate rather than a second condition folded into
+// logBufferingEnabled. logBufferingEnabled answers "does createLog insert the
+// row itself", which is true for ClickHouse whether or not Kafka is in front of
+// it; making Kafka a condition of it would mean every ClickHouse deployment
+// that upgrades has to stand up a Kafka it does not run. Kafka is a new
+// question, so it gets a new switch, and the switch defaults to off.
+func logKafkaEnabled() bool {
+	return logkafka.Configured()
+}
+
 // logBufferingEnabled reports whether createLog hands rows to the buffer
-// instead of inserting them itself. It is the single condition that selects
-// both the buffered write path and the batched INSERT that drains it.
+// instead of inserting them itself. It is the condition that selects both the
+// buffered write path and the batched INSERT that drains it, and it stays true
+// for ClickHouse with Kafka configured: it describes the destination, not the
+// transport.
 func logBufferingEnabled() bool {
 	return common.UsingLogDatabase(common.DatabaseTypeClickHouse)
 }

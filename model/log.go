@@ -100,6 +100,16 @@ func ensureLogRequestId(log *Log) {
 
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
+	if logKafkaEnabled() {
+		// Same reasoning as the buffered branch below, one hop further: the row
+		// is encoded with every field already set, so anything the caller
+		// attached to it (notably the quota saturation marker under
+		// other.admin_info) travels through the topic unchanged. The encoding
+		// keeps `other` as the same opaque string, so the marker's bytes reach
+		// the database exactly as the billing path wrote them.
+		sendLogToKafka(log)
+		return nil
+	}
 	if logBufferingEnabled() {
 		// The row is buffered with every field already set, so anything the
 		// caller attached to it (notably the quota saturation marker under
