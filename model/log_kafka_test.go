@@ -19,6 +19,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/kversion"
 	"gorm.io/driver/clickhouse"
 	"gorm.io/gorm"
 )
@@ -314,6 +318,205 @@ func startKafkaTestConsumer(t *testing.T, cfg logkafka.Config, requestID string,
 	return consumer
 }
 
+// The four functions below let a test read the consumer group's committed
+// offsets and the topic's log end offsets with the Kafka protocol itself, from a
+// client that never joins the group.
+//
+// A second member of the group is not an option: it would take partitions away
+// from the consumer under test and change the thing being observed. franz-go's
+// Client.CommittedOffsets() is not an option either, because it reports the
+// client's local view of its *own* assignment, so it can only answer for a
+// member. Client.Request routes OffsetFetch to the group coordinator and
+// ListOffsets to the partition leaders on its own, so a client with no group and
+// no consume topics configured can ask both questions and disturb nothing.
+func newKafkaOffsetObserver(t *testing.T, brokers []string) *kgo.Client {
+	t.Helper()
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		// The same pin the transport uses: franz-go's newest defaults do not
+		// negotiate with this broker, so an unpinned observer would only ever
+		// report a connection failure.
+		kgo.MaxVersions(kversion.V3_7_0()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(client.Close)
+	return client
+}
+
+// isolatedKafkaTopic creates a topic this test owns, and removes it again when
+// the test ends.
+//
+// A leg that needs a fresh consumer group to be redelivered its own rows cannot
+// be run against the topic the rest of the package shares. It resets to
+// earliest, so it starts at offset 0 and fetches one ConsumerBatchSize budget;
+// on a topic that has accumulated other tests' rows the rows it is looking for
+// are past that budget, and the leg fails for a reason that has nothing to do
+// with what it asserts. An owned topic makes the starting state explicit
+// instead of leaving it to how many tests ran first.
+//
+// Creating and deleting go through a client with no group and no consume
+// topics, which is the same client the offset observers use: it disturbs
+// nothing.
+func isolatedKafkaTopic(t *testing.T, brokers []string) string {
+	t.Helper()
+	client := newKafkaOffsetObserver(t, brokers)
+
+	name := fmt.Sprintf("new-api-logs-test-%d", time.Now().UnixNano())
+	create := kmsg.NewPtrCreateTopicsRequest()
+	create.Topics = []kmsg.CreateTopicsRequestTopic{{
+		Topic:             name,
+		NumPartitions:     1,
+		ReplicationFactor: 1,
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	response, err := client.Request(ctx, create)
+	require.NoError(t, err)
+	created, ok := response.(*kmsg.CreateTopicsResponse)
+	require.True(t, ok, "create topics answered with %T", response)
+	require.Len(t, created.Topics, 1)
+	require.NoError(t, kerr.ErrorForCode(created.Topics[0].ErrorCode),
+		"the topic this test owns could not be created, so the leg would run against the shared one and assert the wrong thing")
+
+	// Registered after the client's own cleanup so that it runs first: cleanups
+	// are last-in-first-out and the delete needs a live client.
+	t.Cleanup(func() {
+		request := kmsg.NewPtrDeleteTopicsRequest()
+		request.Topics = []kmsg.DeleteTopicsRequestTopic{{Topic: &name}}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if _, err := client.Request(ctx, request); err != nil {
+			t.Logf("failed to delete the test topic %s: %v", name, err)
+		}
+	})
+	return name
+}
+
+// observedTopicPartitions asks the broker which partitions the topic has. It is
+// what gives "every partition" a boundary instead of being a figure of speech.
+func observedTopicPartitions(ctx context.Context, client *kgo.Client, topic string) ([]int32, error) {
+	name := topic
+	request := kmsg.NewPtrMetadataRequest()
+	request.Topics = []kmsg.MetadataRequestTopic{{Topic: &name}}
+	response, err := client.Request(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	metadata, ok := response.(*kmsg.MetadataResponse)
+	if !ok {
+		return nil, fmt.Errorf("metadata request answered with %T", response)
+	}
+	for _, described := range metadata.Topics {
+		if described.Topic != nil && *described.Topic == topic {
+			partitions := make([]int32, 0, len(described.Partitions))
+			for _, partition := range described.Partitions {
+				partitions = append(partitions, partition.Partition)
+			}
+			return partitions, nil
+		}
+	}
+	return nil, fmt.Errorf("the metadata response does not describe topic %q", topic)
+}
+
+// observedGroupOffsets is CURRENT-OFFSET for every partition: the offset a
+// member of the group resumes at. A partition the group never committed reports
+// -1, which is exactly the state a missing commit leaves behind.
+func observedGroupOffsets(ctx context.Context, client *kgo.Client, group, topic string, partitions []int32) (map[int32]int64, error) {
+	request := kmsg.NewPtrOffsetFetchRequest()
+	request.Group = group
+	request.Topics = []kmsg.OffsetFetchRequestTopic{{Topic: topic, Partitions: partitions}}
+	response, err := client.Request(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	fetched, ok := response.(*kmsg.OffsetFetchResponse)
+	if !ok {
+		return nil, fmt.Errorf("offset fetch answered with %T", response)
+	}
+	offsets := make(map[int32]int64, len(partitions))
+	for _, described := range fetched.Topics {
+		if described.Topic != topic {
+			continue
+		}
+		for _, partition := range described.Partitions {
+			if err := kerr.ErrorForCode(partition.ErrorCode); err != nil {
+				return nil, err
+			}
+			offsets[partition.Partition] = partition.Offset
+		}
+	}
+	return offsets, nil
+}
+
+// observedLogEndOffsets is LOG-END-OFFSET for every partition: the offset the
+// next row written to that partition will carry.
+func observedLogEndOffsets(ctx context.Context, client *kgo.Client, topic string, partitions []int32) (map[int32]int64, error) {
+	described := kmsg.NewListOffsetsRequestTopic()
+	described.Topic = topic
+	for _, partition := range partitions {
+		requested := kmsg.NewListOffsetsRequestTopicPartition()
+		requested.Partition = partition
+		// -1 is "latest", so the answer is the log end offset.
+		requested.Timestamp = -1
+		// -1 is "no epoch", which is what a plain client has to say; 0 would
+		// claim to know the leader's epoch and can be fenced.
+		requested.CurrentLeaderEpoch = -1
+		described.Partitions = append(described.Partitions, requested)
+	}
+
+	request := kmsg.NewPtrListOffsetsRequest()
+	request.ReplicaID = -1
+	request.Topics = []kmsg.ListOffsetsRequestTopic{described}
+	response, err := client.Request(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	listed, ok := response.(*kmsg.ListOffsetsResponse)
+	if !ok {
+		return nil, fmt.Errorf("list offsets answered with %T", response)
+	}
+	offsets := make(map[int32]int64, len(partitions))
+	for _, describedTopic := range listed.Topics {
+		if describedTopic.Topic != topic {
+			continue
+		}
+		for _, partition := range describedTopic.Partitions {
+			if err := kerr.ErrorForCode(partition.ErrorCode); err != nil {
+				return nil, err
+			}
+			offsets[partition.Partition] = partition.Offset
+		}
+	}
+	return offsets, nil
+}
+
+// observedGroupHasJoinedMember reports whether the group has a member that has
+// finished joining, which is the moment franz-go sets that member's fetch
+// position from the committed offsets.
+//
+// It is what keeps the negative assertion in phase C from being true for the
+// wrong reason: a member that has not joined yet has also "seen nothing", and a
+// fixed wait cannot tell the two apart -- which is the defect phase C used to
+// have.
+func observedGroupHasJoinedMember(ctx context.Context, client *kgo.Client, group string) (bool, error) {
+	request := kmsg.NewPtrDescribeGroupsRequest()
+	request.Groups = []string{group}
+	response, err := client.Request(ctx, request)
+	if err != nil {
+		return false, err
+	}
+	described, ok := response.(*kmsg.DescribeGroupsResponse)
+	if !ok {
+		return false, fmt.Errorf("describe groups answered with %T", response)
+	}
+	for _, reported := range described.Groups {
+		if reported.Group == group {
+			return reported.State == "Stable" && len(reported.Members) > 0, nil
+		}
+	}
+	return false, nil
+}
+
 // TestLogKafkaConsumerCommitsOnlyAfterTheLogDatabaseAcceptedTheBatch is the
 // ordering proof for the consumer, and the reason this slice is worth shipping:
 // an offset is committed only once the rows at or before it are in ClickHouse.
@@ -329,8 +532,6 @@ func TestLogKafkaConsumerCommitsOnlyAfterTheLogDatabaseAcceptedTheBatch(t *testi
 	if brokers == "" {
 		t.Skip("TEST_KAFKA_BROKERS is not configured")
 	}
-	topic := common.GetEnvOrDefaultString("TEST_KAFKA_LOG_TOPIC", "new-api-logs-test")
-
 	db, dropDatabase := openIsolatedClickHouseLogDB(t)
 	t.Cleanup(dropDatabase)
 	useLogDatabase(t, db, common.DatabaseTypeClickHouse)
@@ -339,15 +540,26 @@ func TestLogKafkaConsumerCommitsOnlyAfterTheLogDatabaseAcceptedTheBatch(t *testi
 
 	requestID := fmt.Sprintf("rid-kafka-order-%d", time.Now().UnixNano())
 	t.Setenv("KAFKA_BROKERS", brokers)
-	t.Setenv("KAFKA_LOG_TOPIC", topic)
 	t.Setenv("KAFKA_LOG_GROUP_ID", fmt.Sprintf("new-api-log-consumer-test-%d", time.Now().UnixNano()))
 	t.Setenv("LOG_FLUSH_INTERVAL_MS", "200")
 	t.Setenv("KAFKA_LOG_REQUEST_TIMEOUT_MS", "5000")
 	t.Setenv("KAFKA_LOG_DELIVERY_TIMEOUT_MS", "10000")
+	// The producer owns a spool directory now, and it creates it at startup. The
+	// tests that build one have to say where it goes, or every run would leave a
+	// segment directory behind in the package directory.
+	t.Setenv("KAFKA_LOG_SPOOL_DIR", t.TempDir())
 
 	cfg, err := logkafka.LoadConfig()
 	require.NoError(t, err)
 	require.True(t, cfg.Enabled())
+	// Phase A asserts that a fresh group is redelivered a batch the log database
+	// refused, and a fresh group resets to earliest: it fetches one
+	// ConsumerBatchSize budget from offset 0. On the topic this package shares,
+	// that budget is spent on other tests' rows long before the group reaches its
+	// own, so this leg runs on a topic it owns rather than on one whose size
+	// depends on what ran first.
+	topic := isolatedKafkaTopic(t, cfg.Brokers)
+	cfg.Topic = topic
 	cfg.FlushInterval = logFlushInterval()
 
 	producer, err := logkafka.NewProducer(cfg)
@@ -412,9 +624,71 @@ func TestLogKafkaConsumerCommitsOnlyAfterTheLogDatabaseAcceptedTheBatch(t *testi
 	accepted.stop()
 
 	// Phase C: the same group id again, and now there is nothing left.
+	//
+	// "A new member sees nothing" is only evidence about the commit if the
+	// member is demonstrably up and fetching. A fresh member needs about 3.4 s
+	// to join, be assigned its partitions and fetch from the committed offset,
+	// so asserting two seconds after starting it was equally true of a member
+	// that was still joining -- and deleting the commit left this assertion
+	// passing. The state is polled here instead of waited for: on every
+	// partition, CURRENT-OFFSET must equal LOG-END-OFFSET. A member resumes at
+	// the committed offset, so that equality *is* "the member receives nothing",
+	// and it is false the moment the commit is missing (the group then reports
+	// -1, never having committed anything).
+	observer := newKafkaOffsetObserver(t, cfg.Brokers)
+
+	partitionsCtx, cancelPartitions := context.WithTimeout(context.Background(), 10*time.Second)
+	partitions, err := observedTopicPartitions(partitionsCtx, observer, topic)
+	cancelPartitions()
+	require.NoError(t, err)
+	require.NotEmpty(t, partitions, "the topic has to have partitions for 'every partition' to have a boundary")
+
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		committed, err := observedGroupOffsets(ctx, observer, cfg.GroupID, topic, partitions)
+		if err != nil {
+			return false
+		}
+		end, err := observedLogEndOffsets(ctx, observer, topic, partitions)
+		if err != nil {
+			return false
+		}
+		for _, partition := range partitions {
+			// A partition the group has never read from reports no committed
+			// offset at all (-1). That is the same place as "resumed at the end"
+			// only while the partition is empty, which the log end offset then
+			// reports as 0 -- the member resets to earliest, which is also 0. A
+			// partition that holds rows and was never committed is the state a
+			// missing commit leaves behind, and it is rejected here.
+			if committed[partition] < 0 {
+				if end[partition] != 0 {
+					return false
+				}
+				continue
+			}
+			if committed[partition] != end[partition] {
+				return false
+			}
+		}
+		return true
+	}, 30*time.Second, 100*time.Millisecond,
+		"the consumer group never reached LOG-END-OFFSET on every partition, which is what a write without a commit leaves behind: the rows are in the log database, so their offsets were not committed after the successful write")
+
 	settled := startKafkaTestConsumer(t, cfg, requestID, nil)
-	time.Sleep(2 * time.Second)
-	assert.Zero(t, settled.seen.Load(),
+	require.Eventually(t, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		joined, err := observedGroupHasJoinedMember(ctx, observer, cfg.GroupID)
+		return err == nil && joined
+	}, 30*time.Second, 100*time.Millisecond,
+		"the fresh consumer never finished joining the group, so 'it saw nothing' would not yet be a statement about the committed offsets")
+
+	// The member has joined and its fetch position is the log end, so there is
+	// nothing to deliver. This window is what makes the negative claim cover the
+	// same span a missing commit would have delivered rows in; the causal claim
+	// itself is the offset equality polled above.
+	require.Never(t, func() bool { return settled.seen.Load() > 0 }, 3*time.Second, 100*time.Millisecond,
 		"the offsets must have been committed after the successful write, not before it")
 	settled.stop()
 }
@@ -439,6 +713,12 @@ func TestLogKafkaHarness(t *testing.T) {
 		t.Skip("KAFKA_HARNESS_MODE is not set; this is an experiment driver, not a unit test")
 	}
 	common.InitEnv()
+	if spoolDir := os.Getenv("KAFKA_LOG_SPOOL_DIR"); spoolDir == "" {
+		// The spool is a real directory, so a harness run says where it goes
+		// rather than scattering segments through the working directory the test
+		// binary happened to start in.
+		t.Setenv("KAFKA_LOG_SPOOL_DIR", t.TempDir())
+	}
 	if os.Getenv("HARNESS_SKIP_LOGDB") != "" {
 		// The producer path needs the log database *type* to be ClickHouse but
 		// never touches the handle, so a producer-only leg can run while the

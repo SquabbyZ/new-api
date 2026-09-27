@@ -23,37 +23,61 @@ const reportEvery = 1000
 
 // Producer is an asynchronous Kafka producer for encoded log rows.
 //
-// Send never blocks. When the broker cannot keep up, the row is dropped,
-// counted and reported rather than making a request wait, which is the same
-// trade the in-memory buffer makes when it is full: the request path must not
-// be paced by the log store.
-//
-// The temporary contract of this slice is drop-and-report. The spool slice
-// replaces the drop with a write to KAFKA_LOG_SPOOL_DIR; until it lands, this is
-// the same level of guarantee the buffer gives when the log database refuses
-// writes for good, so it is not a regression. Do not read it as the final
-// design.
+// Send never blocks. A row the client cannot buffer, and a row the client gives
+// up on, is written to the spool on the disk instead of being dropped, so the
+// bound on the producer's buffer is no longer a reason for a row to disappear.
+// The request path's whole cost is one atomic read plus a non-blocking send on a
+// channel: the disk is a fallback for the failure path, not a second write path.
 type Producer struct {
 	client       *kgo.Client
 	topic        string
 	flushTimeout time.Duration
+	spool        *Spool
 
-	dropped   atomic.Int64
+	// inFlight is the bytes handed to the client and not yet reported back by a
+	// delivery callback. It is the single measurement behind both the hysteresis
+	// band Send branches on and the replay health criterion, because two
+	// measurements of the same thing drift apart and then disagree about what
+	// "keeping up" means.
+	inFlight  atomic.Int64
+	highWater int64
+	lowWater  int64
+
 	failed    atomic.Int64
+	spooled   atomic.Int64
 	reported  atomic.Int64
 	closed    atomic.Bool
 	closeOnce sync.Once
 }
 
-// NewProducer builds the producer. It does not contact the broker: an
-// unreachable broker must not stop startup, so a bad address shows up later as
-// delivery failures, which are reported rather than hidden.
+// NewProducer builds the producer and starts the disk fallback it writes to.
+//
+// It does not contact the broker: an unreachable broker must not stop startup,
+// so a bad address shows up later as delivery failures, which land in the spool.
+// An unwritable spool directory is the opposite case and does stop startup,
+// because it is a deterministic misconfiguration whose cost is only paid during
+// an outage.
 func NewProducer(cfg Config) (*Producer, error) {
+	spool, err := NewSpool(cfg)
+	if err != nil {
+		return nil, err
+	}
 	client, err := kgo.NewClient(producerOpts(cfg)...)
 	if err != nil {
+		spool.Close()
 		return nil, fmt.Errorf("failed to create the kafka log producer for %v: %w", cfg.Brokers, err)
 	}
-	return &Producer{client: client, topic: cfg.Topic, flushTimeout: cfg.RequestTimeout}, nil
+	limit := int64(max(cfg.MaxBufferBytes, 1))
+	p := &Producer{
+		client:       client,
+		topic:        cfg.Topic,
+		flushTimeout: cfg.RequestTimeout,
+		spool:        spool,
+		highWater:    limit * 9 / 10,
+		lowWater:     limit / 2,
+	}
+	spool.StartReplay(context.Background(), p.deliverReplay, p.Healthy)
+	return p, nil
 }
 
 // producerOpts maps the configuration onto the client. The settings the design
@@ -81,65 +105,118 @@ func producerOpts(cfg Config) []kgo.Opt {
 }
 
 // Send hands one encoded row to the broker without blocking on it. A row the
-// client cannot buffer -- its buffer is full because the broker is slow or
-// unreachable -- is dropped, counted and reported.
+// client cannot take -- its buffer is full because the broker is slow or
+// unreachable, or the edge of the buffer was reached -- is written to the spool
+// instead, so a full buffer is no longer a reason for a row to be lost.
 func (p *Producer) Send(value []byte) {
 	if p.closed.Load() {
-		p.dropped.Add(1)
-		p.report("the kafka log producer is closed, so the row was dropped")
+		// The window this covers is the shutdown one: the spool is still open
+		// while the client flushes, which is the whole reason it is closed after
+		// the client rather than before it.
+		p.spool.Stash(value)
 		return
 	}
+	if p.inFlight.Load() >= p.highWater {
+		// The band, not the bound: past this point the partition is already full
+		// and the next row would fail its way to the disk after a round trip
+		// anyway, so it goes straight there. The band is what keeps the producer
+		// from oscillating between "buffer full" and "buffer empty" while the
+		// broker is only just keeping up.
+		p.spooled.Add(1)
+		p.spool.Stash(value)
+		p.report("the kafka log producer is at 90% of KAFKA_LOG_MAX_BUFFER_BYTES, so rows are written to the spool until it drains below 50%")
+		return
+	}
+	p.inFlight.Add(int64(len(value)))
 	// TryProduce is the non-blocking half of Produce: at the buffer bound it
 	// fails the record immediately instead of waiting for space, so this cannot
 	// turn into the request path waiting on the broker.
 	p.client.TryProduce(context.Background(), &kgo.Record{Topic: p.topic, Value: value}, p.delivered)
 }
 
-// delivered is the per-record delivery callback. Every failure path ends in a
-// counted, reported drop; nothing here is silent.
-func (p *Producer) delivered(_ *kgo.Record, err error) {
+// Healthy reports whether the producer is keeping up. The threshold is the lower
+// edge of the band Send uses, over the same measurement, so "the producer has
+// recovered" and "the producer has room again" are the same statement.
+func (p *Producer) Healthy() bool {
+	return p.inFlight.Load() <= p.lowWater
+}
+
+// delivered is the per-record delivery callback of the request path, and it is
+// the only entry in the package that writes to the disk.
+func (p *Producer) delivered(record *kgo.Record, err error) {
+	p.inFlight.Add(-int64(len(record.Value)))
 	if err == nil {
 		return
 	}
+	p.spooled.Add(1)
+	p.spool.Stash(record.Value)
 	if errors.Is(err, kgo.ErrMaxBuffered) {
-		p.dropped.Add(1)
-		p.report("the kafka log producer buffer is full (KAFKA_LOG_MAX_BUFFER_BYTES), so the row was dropped; the broker is not keeping up")
+		p.report("the kafka log producer buffer is full (KAFKA_LOG_MAX_BUFFER_BYTES) and the broker is not keeping up, so the row was written to the spool instead of dropped")
 		return
 	}
 	p.failed.Add(1)
-	p.report(fmt.Sprintf("the kafka log producer could not deliver a row to topic %q: %s", p.topic, describeDeliveryError(p.topic, err)))
+	p.report(fmt.Sprintf("the kafka log producer could not deliver a row to topic %q, so it was written to the spool instead: %s", p.topic, describeDeliveryError(p.topic, err)))
 }
 
-// Close flushes what the client still holds and stops it, and is safe to call
-// more than once.
+// deliverReplay is the replay path's own way into the same client, and it is a
+// separate entry on purpose.
+//
+// If a replayed row that failed to deliver reached the callback above, it would
+// be written back to the spool, and a broker that stays down would then replay a
+// segment, fail, write every row out again next to the original, and finally
+// deliver both copies when the broker returns: a live lock with unbounded
+// duplication. Keeping the two entries apart makes that impossible by
+// construction rather than by a flag somebody has to remember to check. This one
+// reports the result and nothing else.
+func (p *Producer) deliverReplay(value []byte, done func(error)) {
+	p.inFlight.Add(int64(len(value)))
+	p.client.TryProduce(context.Background(), &kgo.Record{Topic: p.topic, Value: value}, func(record *kgo.Record, err error) {
+		p.inFlight.Add(-int64(len(record.Value)))
+		done(err)
+	})
+}
+
+// Close stops the replay, flushes and closes the client, and only then closes
+// the spool. It is safe to call more than once.
+//
+// The last two steps are in that order for a reason that is easy to lose: a
+// flush that cannot place its rows fails them through delivered, which writes
+// them to the spool. Closing the spool first would leave exactly those rows --
+// the ones a shutdown could not deliver -- with nowhere to go.
 //
 // The flush is bounded by request.timeout.ms rather than by the delivery
 // timeout, so a shutdown that has to wait for an unreachable broker still
-// returns inside the process shutdown budget. Rows the flush does not place are
-// failed by the close and reported through delivered, so a shutdown never
-// discards rows silently.
+// returns inside the process shutdown budget.
 func (p *Producer) Close() {
 	p.closeOnce.Do(func() {
+		// The replay shares this client, so it has to be off it before the
+		// client goes away.
+		p.spool.StopReplay()
+
 		p.closed.Store(true)
 		ctx, cancel := context.WithTimeout(context.Background(), p.flushTimeout)
 		defer cancel()
 		p.client.Flush(ctx)
 		p.client.Close()
-		if dropped, failed := p.dropped.Load(), p.failed.Load(); dropped > 0 || failed > 0 {
-			common.SysLog(fmt.Sprintf("kafka log producer stopped: %d row(s) dropped, %d row(s) failed to deliver", dropped, failed))
+
+		p.spool.Close()
+
+		if failed, spooled := p.failed.Load(), p.spooled.Load(); failed > 0 || spooled > 0 {
+			common.SysLog(fmt.Sprintf("kafka log producer stopped: %d row(s) written to the spool, %d row(s) failed to deliver", spooled, failed))
 		}
 	})
 }
 
 // report emits one rate-limited line carrying the running totals, so an
 // operator can tell "one row was too large" from "the broker has been down for
-// an hour" without a metrics endpoint.
+// an hour" without a metrics endpoint. Writes to the spool are part of the total
+// so the first one is always reported and the thousandth is not.
 func (p *Producer) report(why string) {
-	total := p.dropped.Load() + p.failed.Load()
+	total := p.failed.Load() + p.spooled.Load()
 	if !shouldReport(&p.reported, total) {
 		return
 	}
-	common.SysError(fmt.Sprintf("%s (topic %q, %d row(s) dropped, %d row(s) failed so far)", why, p.topic, p.dropped.Load(), p.failed.Load()))
+	common.SysError(fmt.Sprintf("%s (topic %q, %d row(s) written to the spool, %d row(s) failed so far)", why, p.topic, p.spooled.Load(), p.failed.Load()))
 }
 
 // shouldReport applies the "first failure always, then one per reportEvery"

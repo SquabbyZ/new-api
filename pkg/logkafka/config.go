@@ -53,6 +53,11 @@ const (
 	envConsumerBatchSize = "KAFKA_LOG_CONSUMER_BATCH_SIZE"
 	envSpoolDir          = "KAFKA_LOG_SPOOL_DIR"
 
+	envSpoolMaxBytes       = "KAFKA_LOG_SPOOL_MAX_BYTES"
+	envSpoolRetentionHours = "KAFKA_LOG_SPOOL_RETENTION_HOURS"
+	envSpoolSegmentBytes   = "KAFKA_LOG_SPOOL_SEGMENT_BYTES"
+	envSpoolSegmentSeconds = "KAFKA_LOG_SPOOL_SEGMENT_SECONDS"
+
 	defaultTopic             = "new-api-logs"
 	defaultGroupID           = "new-api-log-consumer"
 	defaultMaxBufferBytes    = 33554432 // 32 MiB
@@ -63,13 +68,16 @@ const (
 	defaultRetentionHours    = 48
 	defaultConsumerBatchSize = 2000
 
+	defaultSpoolMaxBytes       = 1073741824 // 1 GiB
+	defaultSpoolRetentionHours = 48
+	defaultSpoolSegmentBytes   = 8388608 // 8 MiB
+	defaultSpoolSegmentSeconds = 60
+
 	// defaultSpoolDir is relative to the process working directory, which is the
 	// application directory: it sits next to the default SQLite file. It is
 	// deliberately not os.TempDir(): on Linux that is usually a tmpfs, so a
 	// spool there would be memory pretending to be disk and would vanish with
-	// the host, which is exactly what the disk fallback exists to prevent. The
-	// slice that implements the spool still owes the resolved absolute path at
-	// startup and a warning when the directory is not writable.
+	// the host, which is exactly what the disk fallback exists to prevent.
 	defaultSpoolDir = "new-api-log-spool"
 )
 
@@ -86,6 +94,14 @@ type Config struct {
 	RetentionHours    int
 	ConsumerBatchSize int
 	SpoolDir          string
+
+	// The spool settings. SpoolMaxBytes bounds the whole directory; eviction and
+	// retention both drop whole sealed segments, never part of one, because the
+	// segment format is append-only.
+	SpoolMaxBytes       int64
+	SpoolRetentionHours int
+	SpoolSegmentBytes   int64
+	SpoolSegmentSeconds time.Duration
 
 	// FlushInterval is the longest a consumer batch waits before it is written.
 	// It is not a KAFKA_* setting: the consumer reuses LOG_FLUSH_INTERVAL_MS,
@@ -128,14 +144,22 @@ func LoadConfig() (Config, error) {
 		// max(..., 1) rather than the raw value: strconv accepts a negative
 		// number, and a negative bound would turn every send or batch into an
 		// overflow instead of a limit.
-		MaxBufferBytes:    max(common.GetEnvOrDefault(envMaxBufferBytes, defaultMaxBufferBytes), 1),
-		Linger:            time.Duration(max(common.GetEnvOrDefault(envLingerMs, defaultLingerMs), 0)) * time.Millisecond,
-		DeliveryTimeout:   time.Duration(max(common.GetEnvOrDefault(envDeliveryTimeoutMs, defaultDeliveryTimeoutMs), 1)) * time.Millisecond,
-		RequestTimeout:    time.Duration(max(common.GetEnvOrDefault(envRequestTimeoutMs, defaultRequestTimeoutMs), 1)) * time.Millisecond,
-		RetryBackoff:      time.Duration(max(common.GetEnvOrDefault(envRetryBackoffMs, defaultRetryBackoffMs), 1)) * time.Millisecond,
-		RetentionHours:    max(common.GetEnvOrDefault(envRetentionHours, defaultRetentionHours), 1),
-		ConsumerBatchSize: max(common.GetEnvOrDefault(envConsumerBatchSize, defaultConsumerBatchSize), 1),
-		SpoolDir:          common.GetEnvOrDefaultString(envSpoolDir, defaultSpoolDir),
+		MaxBufferBytes:      max(common.GetEnvOrDefault(envMaxBufferBytes, defaultMaxBufferBytes), 1),
+		Linger:              time.Duration(max(common.GetEnvOrDefault(envLingerMs, defaultLingerMs), 0)) * time.Millisecond,
+		DeliveryTimeout:     time.Duration(max(common.GetEnvOrDefault(envDeliveryTimeoutMs, defaultDeliveryTimeoutMs), 1)) * time.Millisecond,
+		RequestTimeout:      time.Duration(max(common.GetEnvOrDefault(envRequestTimeoutMs, defaultRequestTimeoutMs), 1)) * time.Millisecond,
+		RetryBackoff:        time.Duration(max(common.GetEnvOrDefault(envRetryBackoffMs, defaultRetryBackoffMs), 1)) * time.Millisecond,
+		RetentionHours:      max(common.GetEnvOrDefault(envRetentionHours, defaultRetentionHours), 1),
+		ConsumerBatchSize:   max(common.GetEnvOrDefault(envConsumerBatchSize, defaultConsumerBatchSize), 1),
+		SpoolDir:            common.GetEnvOrDefaultString(envSpoolDir, defaultSpoolDir),
+		SpoolMaxBytes:       int64(max(common.GetEnvOrDefault(envSpoolMaxBytes, defaultSpoolMaxBytes), 1)),
+		SpoolRetentionHours: max(common.GetEnvOrDefault(envSpoolRetentionHours, defaultSpoolRetentionHours), 1),
+		// The effective segment size is min(segment, capacity), so "at least one
+		// segment fits" always holds. Capacity smaller than a single row is not
+		// expressible here -- row size is the log content's business -- so that
+		// case is handled where the row is written: it is dropped and reported.
+		SpoolSegmentBytes:   int64(max(min(common.GetEnvOrDefault(envSpoolSegmentBytes, defaultSpoolSegmentBytes), common.GetEnvOrDefault(envSpoolMaxBytes, defaultSpoolMaxBytes)), 1)),
+		SpoolSegmentSeconds: time.Duration(max(common.GetEnvOrDefault(envSpoolSegmentSeconds, defaultSpoolSegmentSeconds), 1)) * time.Second,
 	}, nil
 }
 

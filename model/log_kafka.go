@@ -72,15 +72,19 @@ func startLogKafka() error {
 	}
 	common.SysLog(fmt.Sprintf("kafka log transport enabled: brokers=%v topic=%s group=%s linger=%s delivery_timeout=%s request_timeout=%s retry_backoff=%s max_buffer_bytes=%d consumer_batch_size=%d flush_interval=%s",
 		cfg.Brokers, cfg.Topic, cfg.GroupID, cfg.Linger, cfg.DeliveryTimeout, cfg.RequestTimeout, cfg.RetryBackoff, cfg.MaxBufferBytes, cfg.ConsumerBatchSize, cfg.FlushInterval))
-	// These two are declarations, not client settings: the application does not
-	// create the topic or write a spool yet, so an operator reading them back
-	// has to be told they are what to configure, not what this process does.
-	common.SysLog(fmt.Sprintf("kafka log transport declarations (this process does not act on them): KAFKA_LOG_RETENTION_HOURS=%d is the retention the topic should carry, KAFKA_LOG_SPOOL_DIR=%s is where the disk fallback will be written",
-		cfg.RetentionHours, cfg.SpoolDir))
+	// One declaration, not a client setting: the application still does not create
+	// the topic, so an operator reading this back has to be told it is what to
+	// configure rather than what this process does. The spool is no longer among
+	// the declarations -- this process does write it, and it prints its own
+	// resolved absolute path when it is created.
+	common.SysLog(fmt.Sprintf("kafka log transport declaration (this process does not act on it): KAFKA_LOG_RETENTION_HOURS=%d is the retention the topic should carry", cfg.RetentionHours))
 	return nil
 }
 
 func startLogKafkaProducer(cfg logkafka.Config) error {
+	// NewProducer creates the spool directory and starts its writer and replay
+	// goroutines before it can return a producer, so the disk fallback is up
+	// before anything can be sent to a broker that is not.
 	producer, err := logkafka.NewProducer(cfg)
 	if err != nil {
 		return err
@@ -109,6 +113,12 @@ func startLogKafkaConsumer(cfg logkafka.Config) error {
 // StopLogKafka closes the producer and then stops the consumer. The order is
 // the contract: closing the producer is what puts the last accepted rows into
 // the topic, and the consumer has to still be running to see them.
+//
+// The producer's close has an order inside it that matters as much: the replay
+// stops, then the client flushes and closes and fails whatever it could not
+// place into the spool, and only then is the spool drained and sealed. Swapping
+// those last two would leave the rows a shutdown could not deliver with nowhere
+// to go, which is the one moment the disk fallback exists for.
 //
 // It must run before model.CloseDB, because the consumer writes through the log
 // database handle. Call it once; a second call is a no-op.

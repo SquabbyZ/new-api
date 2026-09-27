@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,6 +22,29 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// spoolRows reads back every row the spool directory holds, in file order. It is
+// how a test asks "did this row reach the disk" without depending on the writer
+// goroutine's timing.
+func spoolRows(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var rows []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		require.NoError(t, err)
+		for _, line := range strings.Split(string(data), "\n") {
+			if line != "" {
+				rows = append(rows, line)
+			}
+		}
+	}
+	return rows
+}
+
 // captureSysErrors points the process error log at a buffer for the rest of the
 // test. Drop and failure reports are the observable behavior under test, and
 // common.SysError is where they land.
@@ -32,6 +58,23 @@ func captureSysErrors(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() {
 		common.LogWriterMu.Lock()
 		gin.DefaultErrorWriter = previous
+		common.LogWriterMu.Unlock()
+	})
+	return &captured
+}
+
+// captureSysLogs does the same for the ordinary log stream, which is where the
+// spool reports what it resolved and where it is writing.
+func captureSysLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var captured bytes.Buffer
+	common.LogWriterMu.Lock()
+	previous := gin.DefaultWriter
+	gin.DefaultWriter = &captured
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultWriter = previous
 		common.LogWriterMu.Unlock()
 	})
 	return &captured
@@ -156,6 +199,7 @@ func TestProducerSendDoesNotWaitForTheBroker(t *testing.T) {
 		DeliveryTimeout: 5 * time.Minute,
 		RequestTimeout:  requestTimeout,
 		RetryBackoff:    200 * time.Millisecond,
+		SpoolDir:        t.TempDir(),
 	}
 	producer, err := NewProducer(cfg)
 	require.NoError(t, err, "an unreachable broker must not fail startup")
@@ -171,17 +215,18 @@ func TestProducerSendDoesNotWaitForTheBroker(t *testing.T) {
 
 	assert.Less(t, elapsed, requestTimeout/10,
 		"accepting a row must not wait for the broker; a synchronous send would take at least request.timeout.ms")
-	assert.Zero(t, producer.dropped.Load(), "the buffer holds far more than this, so nothing had to be dropped")
+	assert.Zero(t, producer.spool.stashedRows.Load(), "the buffer holds far more than this, so nothing had to reach the disk")
 }
 
-// TestProducerReportsRowsItCannotBuffer covers the other half: the producer is
-// bounded, and a row it cannot take is counted and reported rather than
-// silently discarded. The byte bound is deliberately just above one row, so the
-// second row is the one that no longer fits.
-func TestProducerReportsRowsItCannotBuffer(t *testing.T) {
+// TestProducerWritesRowsItCannotBufferToTheSpool is the half of the contract
+// this slice changes: a row the producer's buffer cannot take is no longer a
+// drop, it is a write to the spool. The byte bound is deliberately just above
+// one row, so the second row is the one that no longer fits.
+func TestProducerWritesRowsItCannotBufferToTheSpool(t *testing.T) {
 	payload := []byte(`{"id":1,"content":"a log row"}`)
 	require.Greater(t, len(payload), 8)
 
+	spoolDir := t.TempDir()
 	cfg := Config{
 		Brokers:         []string{silentBroker(t)},
 		Topic:           "new-api-logs",
@@ -189,25 +234,33 @@ func TestProducerReportsRowsItCannotBuffer(t *testing.T) {
 		DeliveryTimeout: 5 * time.Minute,
 		RequestTimeout:  200 * time.Millisecond,
 		RetryBackoff:    200 * time.Millisecond,
+		SpoolDir:        spoolDir,
 	}
 	producer, err := NewProducer(cfg)
 	require.NoError(t, err)
-	t.Cleanup(producer.Close)
 
 	output := captureSysErrors(t)
 	for range 10 {
 		producer.Send(payload)
 	}
+	// Closing flushes, fails what it could not place, drains the spool queue and
+	// seals the segment, so when it returns every accepted row is on the disk.
+	// The assertion is then about what was written, not about how long to wait.
+	producer.Close()
 
-	require.Eventually(t, func() bool { return producer.dropped.Load() > 0 }, 5*time.Second, 20*time.Millisecond,
-		"rows the buffer could not take must be counted")
+	rows := spoolRows(t, spoolDir)
+	assert.Len(t, rows, 10, "a row the producer buffer could not take has to reach the disk instead of being dropped")
+	for _, row := range rows {
+		assert.Equal(t, string(payload), row,
+			"the spool stores the payload the producer would have sent, byte for byte; re-encoding it would deform anything a caller encoded")
+	}
 	assert.Contains(t, output.String(), "KAFKA_LOG_MAX_BUFFER_BYTES", "the report has to say which bound was hit")
-	assert.Less(t, producer.dropped.Load(), int64(10), "the first rows fit; only the overflow is dropped")
 }
 
-// TestProducerSendAfterCloseIsReported covers the shutdown race: a row offered
-// after the producer stopped is a drop, and it is reported as one.
-func TestProducerSendAfterCloseIsReported(t *testing.T) {
+// TestProducerSendAfterCloseIsStillCountedAndReported covers the shutdown race:
+// a row offered after the spool has closed has nowhere left to go, and that is
+// counted and reported rather than silently discarded.
+func TestProducerSendAfterCloseIsStillCountedAndReported(t *testing.T) {
 	cfg := Config{
 		Brokers:         []string{silentBroker(t)},
 		Topic:           "new-api-logs",
@@ -215,6 +268,7 @@ func TestProducerSendAfterCloseIsReported(t *testing.T) {
 		DeliveryTimeout: 5 * time.Minute,
 		RequestTimeout:  200 * time.Millisecond,
 		RetryBackoff:    200 * time.Millisecond,
+		SpoolDir:        t.TempDir(),
 	}
 	producer, err := NewProducer(cfg)
 	require.NoError(t, err)
@@ -224,8 +278,8 @@ func TestProducerSendAfterCloseIsReported(t *testing.T) {
 	producer.Close()
 	producer.Send([]byte(`{"id":1}`))
 
-	assert.EqualValues(t, 1, producer.dropped.Load())
-	assert.Contains(t, output.String(), "producer is closed")
+	assert.EqualValues(t, 1, producer.spool.droppedRows.Load())
+	assert.Contains(t, output.String(), "spool is already closed")
 }
 
 // TestConsumerKeepsTheBatchWhenTheWriteFails is the ordering guard for the
