@@ -242,6 +242,8 @@ func main() {
 	if common.DataExportEnabled {
 		model.SaveQuotaDataCache()
 	}
+	// 刷写已入队的日志，避免正常关闭丢失缓冲中的日志
+	model.StopLogFlush()
 	common.SysLog("server exited")
 }
 
@@ -345,6 +347,7 @@ func InitResources() error {
 	if err != nil {
 		return err
 	}
+	model.StartLogFlush()
 
 	// Initialize Redis
 	err = common.InitRedisClient()

@@ -100,6 +100,14 @@ func ensureLogRequestId(log *Log) {
 
 func createLog(log *Log) error {
 	ensureLogRequestId(log)
+	if logBufferingEnabled() {
+		// The row is buffered with every field already set, so anything the
+		// caller attached to it (notably the quota saturation marker under
+		// other.admin_info) reaches the database unchanged. Nothing here reads
+		// the row back, so deferring the INSERT is invisible to the caller.
+		enqueueLog(log)
+		return nil
+	}
 	return LOG_DB.Create(log).Error
 }
 
