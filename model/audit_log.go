@@ -139,11 +139,11 @@ func RecordAuditLog(c *gin.Context, entry AuditLog) {
 func GetAuditLogs(filter AuditLogFilter, start, limit, viewerRole int) ([]*AuditLog, int64, error) {
 	query := LOG_DB.Model(&AuditLog{})
 	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		// Decode native JSON through database/sql as text for AuditOther.Scan.
-		// Preserve numeric metadata instead of returning quoted Int64 values.
+		// `other` is a String column, so reading it needs no JSON-decoding
+		// setting. quote=0 stays as the deliberate departure from the default
+		// that renders 64-bit integers inside JSON as quoted strings.
 		query = query.WithContext(clickhouse.Context(query.Statement.Context, clickhouse.WithSettings(clickhouse.Settings{
-			"output_format_native_write_json_as_string": 1,
-			"output_format_json_quote_64bit_integers":   0,
+			"output_format_json_quote_64bit_integers": 0,
 		})))
 	}
 	if viewerRole < common.RoleRootUser {

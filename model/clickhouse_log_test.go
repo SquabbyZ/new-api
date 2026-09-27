@@ -566,9 +566,9 @@ func TestClickHouseAuditLogMigrationIsConcurrencySafe(t *testing.T) {
 // TestClickHouseAuditLogWriteRoundTripThroughStringColumn covers the write path
 // on a String `other` column: the write model's `type:json` tag is a DDL
 // declaration, so it must not change what a row stores — the encoded text is the
-// value. GetAuditLogs cannot be the reader here (it sends
-// output_format_native_write_json_as_string, which this server does not have),
-// so the column is read directly through the same production write call.
+// value. The column is read directly through the same production write call, so
+// this test observes the stored bytes on their own; the read path through
+// GetAuditLogs is covered by TestIndependentAuditLogStores.
 func TestClickHouseAuditLogWriteRoundTripThroughStringColumn(t *testing.T) {
 	db := openClickHouseAuditLogTestDB(t, false)
 	useLogDatabase(t, db, common.DatabaseTypeClickHouse)
