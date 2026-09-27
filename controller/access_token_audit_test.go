@@ -532,7 +532,15 @@ func verifyAuditJSONStorage(t *testing.T) {
 			otherType = strings.ToLower(column.DatabaseTypeName())
 		}
 	}
-	assert.Equal(t, "json", otherType)
+	// The ClickHouse log database keeps this column as String: the audit_logs DDL
+	// no longer depends on the experimental JSON type, and the writer already
+	// sends encoded text. The round-trip below is what proves the `type:json` tag
+	// stays inert there.
+	expectedOtherType := "json"
+	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
+		expectedOtherType = "string"
+	}
+	assert.Equal(t, expectedOtherType, otherType)
 
 	metadata := model.AuditOther{
 		Op: &model.AuditOperation{Action: "channel.update", Params: model.AuditFields{

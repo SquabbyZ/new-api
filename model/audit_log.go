@@ -238,20 +238,75 @@ func GetUserAccessTokenStatus(userId int) (*UserAccessTokenStatus, error) {
 	return status, nil
 }
 
+// clickHouseAuditLogCreateTableSQL is the audit_logs schema for the ClickHouse
+// log database. `other` is a String: the writer sends an encoded string
+// (common.Marshal(entry.Other)) and never the JSON type's own semantics, so
+// declaring the column JSON only made the table depend on the experimental JSON
+// type. Creating that type requires the session setting
+// allow_experimental_json_type, which is not part of any DSN this repository
+// ships -- `docker-compose.yml` configures ClickHouse without it -- so the table
+// could not be created at all and startup ended in FatalLog.
+const clickHouseAuditLogCreateTableSQL = `
+CREATE TABLE IF NOT EXISTS audit_logs (
+	id Int64 DEFAULT 0, event_id String, user_id Int64, username String, actor_role Int32,
+	created_at Int64, category String, action String, token_ref String,
+	auth_method String, ip String, user_agent String, method String, route String,
+	status Int32, success UInt8, request_id String, content String, other String
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(toDateTime(created_at))
+ORDER BY (created_at, event_id)`
+
 // MigrateAuditLogs also supports independently configured ClickHouse log stores.
 // No TTL clause or usage-log cleanup integration is intentional.
 func MigrateAuditLogs() error {
 	if !common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
 		return LOG_DB.AutoMigrate(&AuditLog{})
 	}
-	return LOG_DB.Exec(`CREATE TABLE IF NOT EXISTS audit_logs (
-		id Int64 DEFAULT 0, event_id String, user_id Int64, username String, actor_role Int32,
-		created_at Int64, category String, action String, token_ref String,
-		auth_method String, ip String, user_agent String, method String, route String,
-		status Int32, success UInt8, request_id String, content String, other JSON
-	) ENGINE = MergeTree()
-	PARTITION BY toYYYYMM(toDateTime(created_at))
-	ORDER BY (created_at, event_id)`).Error
+	if err := LOG_DB.Exec(clickHouseAuditLogCreateTableSQL).Error; err != nil {
+		return err
+	}
+	// CREATE TABLE IF NOT EXISTS cannot change a table that already exists, so
+	// the column type change below is applied to existing tables separately. It
+	// is a no-op on a database the statement above created.
+	return migrateClickHouseAuditLogOtherColumn()
+}
+
+// migrateClickHouseAuditLogOtherColumn turns an existing `audit_logs.other` of
+// any other type into String. Reading and modifying a legacy JSON column needs
+// no session setting (allow_experimental_json_type only gates creating one), and
+// the change is lossless for the value already stored.
+//
+// The probe and the ALTER are separate statements, so they are not atomic: two
+// masters starting in the same window (NODE_TYPE unset means every node is a
+// master) can both read JSON and both issue the ALTER. That needs no guard.
+// ClickHouse derives a mutation id from the statement text, so the second
+// identical ALTER folds into the first, and a MODIFY COLUMN that finds the
+// column already String succeeds without registering a mutation at all (both
+// measured on 24.8.14.39). MODIFY COLUMN has no IF NOT EXISTS form and does not
+// need one; this is not the ADD INDEX case, where the duplicate name is an
+// error.
+//
+// The probe reads system.columns, which reports the new type as soon as the
+// ALTER is accepted -- the rewrite of the parts is an asynchronous mutation that
+// this function deliberately does not wait for -- so the next startup already
+// reads String and issues nothing.
+func migrateClickHouseAuditLogOtherColumn() error {
+	var columns []struct {
+		Type string `gorm:"column:type"`
+	}
+	if err := LOG_DB.Raw(
+		"SELECT type FROM system.columns WHERE database = currentDatabase() AND table = 'audit_logs' AND name = 'other'",
+	).Scan(&columns).Error; err != nil {
+		return err
+	}
+	if len(columns) == 0 || columns[0].Type == "String" {
+		return nil
+	}
+	const alter = "ALTER TABLE audit_logs MODIFY COLUMN other String"
+	if err := LOG_DB.Exec(alter).Error; err != nil {
+		return fmt.Errorf("audit_logs.other is %s and could not be changed to String with %q: %w", columns[0].Type, alter, err)
+	}
+	return nil
 }
 
 func ValidAuditCategory(category string) bool {

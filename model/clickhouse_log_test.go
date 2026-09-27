@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -346,6 +348,251 @@ func TestClickHouseLogSkippingIndexesSurviveRepeatRun(t *testing.T) {
 	}
 	assert.Equal(t, shapeAfterFirstRun, clickHouseLogsShape(t, db))
 	assert.Equal(t, indexCountAfterFirstRun, clickHouseLogSkippingIndexCount(t, db))
+}
+
+// legacyClickHouseAuditLogsDDL is the audit_logs shape shipped before this
+// slice: an experimental JSON `other` column. It is frozen on purpose —
+// deriving it from the current DDL would make the upgrade tests describe the
+// code instead of the upgrade.
+const legacyClickHouseAuditLogsDDL = `
+CREATE TABLE audit_logs (
+	id Int64 DEFAULT 0, event_id String, user_id Int64, username String, actor_role Int32,
+	created_at Int64, category String, action String, token_ref String,
+	auth_method String, ip String, user_agent String, method String, route String,
+	status Int32, success UInt8, request_id String, content String, other JSON
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(toDateTime(created_at))
+ORDER BY (created_at, event_id)`
+
+// clickHouseWithJSONTypeEnabled attaches the setting to the query itself. A bare
+// `SET allow_experimental_json_type=1` cannot be used for a fixture: GORM runs
+// statements through database/sql, so the SET and the CREATE that needs it can
+// land on different pooled connections. The setting gates creating a JSON column
+// only, so it is the legacy fixture below that needs it — production reads and
+// modifies the column without it.
+func clickHouseWithJSONTypeEnabled(db *gorm.DB) *gorm.DB {
+	return db.WithContext(clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
+		"allow_experimental_json_type": 1,
+	})))
+}
+
+// openClickHouseAuditLogTestDB opens the real ClickHouse instance with no
+// audit_logs table, or — with legacy — with the JSON-column table the previous
+// release created.
+func openClickHouseAuditLogTestDB(t *testing.T, legacy bool) *gorm.DB {
+	t.Helper()
+	db := openClickHouseLogTestDB(t, &sqlRecorder{})
+	require.NoError(t, db.Exec("DROP TABLE IF EXISTS audit_logs").Error)
+	t.Cleanup(func() { _ = db.Exec("DROP TABLE IF EXISTS audit_logs").Error })
+	if legacy {
+		require.NoError(t, clickHouseWithJSONTypeEnabled(db).Exec(legacyClickHouseAuditLogsDDL).Error)
+	}
+	return db
+}
+
+func clickHouseAuditLogOtherType(t *testing.T, db *gorm.DB) string {
+	t.Helper()
+	var columns []struct {
+		Type string `gorm:"column:type"`
+	}
+	require.NoError(t, db.Raw(
+		"SELECT type FROM system.columns WHERE database = currentDatabase() AND table = 'audit_logs' AND name = 'other'",
+	).Scan(&columns).Error)
+	require.Len(t, columns, 1, "audit_logs.other must exist")
+	return columns[0].Type
+}
+
+type clickHouseAuditLogRow struct {
+	Id      int64  `gorm:"column:id"`
+	EventId string `gorm:"column:event_id"`
+	Other   string `gorm:"column:other"`
+}
+
+// clickHouseAuditLogRows reads the audit rows as text. Rows are compared as
+// text on purpose: a JSON column and a String column lay the same value out
+// differently (the RowBinary form measured 76 B before and 56 B after on
+// 24.8.14.39), so a serialized comparison would differ even when nothing was
+// lost. `toString` is applied server-side so both reads arrive as String.
+func clickHouseAuditLogRows(t *testing.T, db *gorm.DB) []clickHouseAuditLogRow {
+	t.Helper()
+	var rows []clickHouseAuditLogRow
+	require.NoError(t, db.Raw(
+		"SELECT id, event_id, toString(other) AS other FROM audit_logs ORDER BY id",
+	).Scan(&rows).Error)
+	return rows
+}
+
+// clickHouseAuditLogMutationCount counts the mutations registered for
+// audit_logs. It separates "the second startup did nothing" from "the second
+// startup re-issued an ALTER that quietly succeeded".
+func clickHouseAuditLogMutationCount(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	var count int64
+	require.NoError(t, db.Raw(
+		"SELECT count() FROM system.mutations WHERE database = currentDatabase() AND table = 'audit_logs'",
+	).Scan(&count).Error)
+	return count
+}
+
+// clickHouseAuditLogAlterStatements counts the ALTER statements the server
+// actually received for audit_logs, which is the only way to see whether a
+// startup issued one: an identical statement folded into an existing mutation
+// leaves system.mutations unchanged, so the mutation count alone cannot answer
+// that question.
+func clickHouseAuditLogAlterStatements(t *testing.T, db *gorm.DB) int64 {
+	t.Helper()
+	require.NoError(t, db.Exec("SYSTEM FLUSH LOGS").Error)
+	var statements int64
+	require.NoError(t, db.Raw(
+		"SELECT count() FROM system.query_log WHERE event_time >= now() - 300 AND type = 'QueryFinish' AND query_kind = 'Alter' AND query LIKE 'ALTER TABLE audit_logs%'",
+	).Scan(&statements).Error)
+	return statements
+}
+
+// TestClickHouseAuditLogCreateTableSQL pins the audit_logs DDL to a String
+// `other`, so the half of the fix that covers fresh installs is checked even
+// where no ClickHouse instance is configured. The integration test below proves
+// the statement is accepted without any session setting.
+func TestClickHouseAuditLogCreateTableSQL(t *testing.T) {
+	assert.Contains(t, clickHouseAuditLogCreateTableSQL, "other String")
+	assert.NotContains(t, clickHouseAuditLogCreateTableSQL, "other JSON")
+	assert.Contains(t, clickHouseAuditLogCreateTableSQL, "ENGINE = MergeTree()")
+	assert.Contains(t, clickHouseAuditLogCreateTableSQL, "PARTITION BY toYYYYMM(toDateTime(created_at))")
+	assert.Contains(t, clickHouseAuditLogCreateTableSQL, "ORDER BY (created_at, event_id)")
+	assert.NotContains(t, clickHouseAuditLogCreateTableSQL, "TTL")
+}
+
+// TestClickHouseAuditLogFreshInstallNeedsNoJSONSetting is the direct evidence
+// for the reported defect: the connection carries no
+// allow_experimental_json_type setting, so a JSON column in the DDL fails to
+// create with Code 44 — which reaches main's FatalLog — while the String column
+// is created.
+func TestClickHouseAuditLogFreshInstallNeedsNoJSONSetting(t *testing.T) {
+	db := openClickHouseAuditLogTestDB(t, false)
+	useLogDatabase(t, db, common.DatabaseTypeClickHouse)
+
+	require.NoError(t, MigrateAuditLogs())
+	assert.Equal(t, "String", clickHouseAuditLogOtherType(t, db))
+
+	// A probe that finds no such column is nothing to do, not an error.
+	require.NoError(t, db.Exec("DROP TABLE audit_logs").Error)
+	require.NoError(t, migrateClickHouseAuditLogOtherColumn())
+}
+
+// TestClickHouseAuditLogUpgradeFromJSONColumn proves on the real ClickHouse
+// instance that an existing table with the experimental JSON column migrates to
+// String, that the text already stored is carried over unchanged, and that a
+// second startup issues nothing.
+func TestClickHouseAuditLogUpgradeFromJSONColumn(t *testing.T) {
+	db := openClickHouseAuditLogTestDB(t, true)
+	useLogDatabase(t, db, common.DatabaseTypeClickHouse)
+
+	require.NoError(t, db.Exec(`
+		INSERT INTO audit_logs (id, event_id, other) VALUES
+		(1, 'legacy-nested', '{"a":"1","b":{"c":"x"},"d":["1","2","3"]}'),
+		(2, 'legacy-plain', '{"s":"plain"}')`).Error)
+	require.Equal(t, "JSON", clickHouseAuditLogOtherType(t, db))
+	before := clickHouseAuditLogRows(t, db)
+	// The exact stored text is pinned here, so the comparison below cannot be
+	// satisfied by two equally empty or equally truncated reads.
+	require.Equal(t, []clickHouseAuditLogRow{
+		{Id: 1, EventId: "legacy-nested", Other: `{"a":"1","b":{"c":"x"},"d":["1","2","3"]}`},
+		{Id: 2, EventId: "legacy-plain", Other: `{"s":"plain"}`},
+	}, before)
+
+	require.NoError(t, MigrateAuditLogs())
+	assert.Equal(t, "String", clickHouseAuditLogOtherType(t, db))
+	assert.Equal(t, before, clickHouseAuditLogRows(t, db), "changing the column type must not change the stored text")
+	assert.EqualValues(t, 1, clickHouseAuditLogMutationCount(t, db))
+
+	// The second startup must not re-issue the ALTER. The mutation count alone
+	// cannot show that — ClickHouse folds an identical statement into the
+	// existing mutation — so the statement count is read from query_log, which
+	// records what the server actually received.
+	altersBefore := clickHouseAuditLogAlterStatements(t, db)
+	require.NoError(t, MigrateAuditLogs())
+	assert.Equal(t, altersBefore, clickHouseAuditLogAlterStatements(t, db), "the second startup must not issue the ALTER again")
+	assert.EqualValues(t, 1, clickHouseAuditLogMutationCount(t, db))
+	assert.Equal(t, before, clickHouseAuditLogRows(t, db))
+}
+
+// TestClickHouseAuditLogMigrationIsConcurrencySafe covers the default
+// deployment, where NODE_TYPE unset means every node is a master and all of them
+// run the startup migration at once. The probe and the ALTER are not atomic, so
+// these are the real interleavings; none of them may fail a node, and the ALTERs
+// arriving after the first must not add mutations.
+func TestClickHouseAuditLogMigrationIsConcurrencySafe(t *testing.T) {
+	db := openClickHouseAuditLogTestDB(t, true)
+	useLogDatabase(t, db, common.DatabaseTypeClickHouse)
+
+	require.NoError(t, db.Exec(`INSERT INTO audit_logs (id, event_id, other) VALUES (1, 'concurrent', '{"s":"plain"}')`).Error)
+	before := clickHouseAuditLogRows(t, db)
+	require.Equal(t, "JSON", clickHouseAuditLogOtherType(t, db))
+
+	// Each goroutine takes its own pooled connection and runs the whole
+	// production step, probe included.
+	const masters = 8
+	altersBefore := clickHouseAuditLogAlterStatements(t, db)
+	start := make(chan struct{})
+	errs := make([]error, masters)
+	var workers sync.WaitGroup
+	for i := range masters {
+		workers.Go(func() {
+			<-start
+			errs[i] = migrateClickHouseAuditLogOtherColumn()
+		})
+	}
+	close(start)
+	workers.Wait()
+	for i, err := range errs {
+		require.NoErrorf(t, err, "master %d failed its startup migration", i)
+	}
+	assert.Equal(t, "String", clickHouseAuditLogOtherType(t, db))
+	assert.EqualValues(t, 1, clickHouseAuditLogMutationCount(t, db), "identical ALTERs must fold into one mutation")
+	assert.Equal(t, before, clickHouseAuditLogRows(t, db))
+	// Logged, not asserted: how many of the masters got past the probe before the
+	// first ALTER landed depends on scheduling. Any count from 1 to masters is a
+	// correct outcome — 1 means the pool serialized them, more means the race was
+	// exercised and the losers were still accepted.
+	t.Logf("%d of %d masters issued the ALTER", clickHouseAuditLogAlterStatements(t, db)-altersBefore, masters)
+
+	// The loser of a real race can also arrive after the winner finished, which
+	// is this ALTER against an already-String column: it succeeds and registers
+	// no second mutation. That is what makes a lock unnecessary.
+	require.NoError(t, db.Exec("ALTER TABLE audit_logs MODIFY COLUMN other String").Error)
+	assert.EqualValues(t, 1, clickHouseAuditLogMutationCount(t, db))
+}
+
+// TestClickHouseAuditLogWriteRoundTripThroughStringColumn covers the write path
+// on a String `other` column: the write model's `type:json` tag is a DDL
+// declaration, so it must not change what a row stores — the encoded text is the
+// value. GetAuditLogs cannot be the reader here (it sends
+// output_format_native_write_json_as_string, which this server does not have),
+// so the column is read directly through the same production write call.
+func TestClickHouseAuditLogWriteRoundTripThroughStringColumn(t *testing.T) {
+	db := openClickHouseAuditLogTestDB(t, false)
+	useLogDatabase(t, db, common.DatabaseTypeClickHouse)
+	require.NoError(t, MigrateAuditLogs())
+
+	metadata := AuditOther{
+		Op:        &AuditOperation{Action: "channel.update", Params: AuditFields{"id": 42, "large_id": uint64(9007199254740993)}},
+		AdminInfo: &AuditAdminInfo{AdminID: 1},
+	}
+	RecordAuditLog(nil, AuditLog{
+		ActorRole: common.RoleAdminUser, UserId: 7, Username: "round-trip-owner",
+		Category: AuditCategoryOperation, RequestId: "string-round-trip", Other: metadata,
+	})
+	expected, err := common.Marshal(metadata)
+	require.NoError(t, err)
+
+	var stored []struct {
+		Other string `gorm:"column:other"`
+	}
+	require.NoError(t, db.Raw(
+		"SELECT toString(other) AS other FROM audit_logs WHERE request_id = 'string-round-trip'",
+	).Scan(&stored).Error)
+	require.Len(t, stored, 1, "the audit row must be written")
+	assert.JSONEq(t, string(expected), stored[0].Other)
 }
 
 // clickHouseExplainSkip runs EXPLAIN indexes=1 and returns the granules the
