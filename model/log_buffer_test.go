@@ -43,7 +43,7 @@ func resetLogBuffer(t *testing.T) {
 	clear := func() {
 		logBufferMu.Lock()
 		logBufferRows = nil
-		logBufferDropped = 0
+		logBufferDropped.Store(0)
 		logDropReported = 0
 		logBufferMu.Unlock()
 		logFlushFailures = 0
@@ -336,12 +336,12 @@ func TestLogBufferDropsWhenFullAndReports(t *testing.T) {
 
 	enqueueLog(sampleLogRow(0, "rid-dropped"))
 	assert.Len(t, logBufferRows, logBufferCapacity, "the buffer must stay bounded")
-	assert.EqualValues(t, 1, logBufferDropped)
+	assert.EqualValues(t, 1, logBufferDropped.Load())
 
 	for i := range logDropReportEvery {
 		enqueueLog(sampleLogRow(int64(i), "rid-dropped"))
 	}
-	assert.EqualValues(t, 1+logDropReportEvery, logBufferDropped)
+	assert.EqualValues(t, 1+logDropReportEvery, logBufferDropped.Load())
 	assert.Len(t, logBufferRows, logBufferCapacity)
 }
 
@@ -414,7 +414,7 @@ func TestLogBufferKeepsEveryRowUnderConcurrentProducers(t *testing.T) {
 	flusher.Wait()
 	flushLogBuffer()
 
-	assert.Zero(t, logBufferDropped, "no row may be dropped while the buffer is under its bound")
+	assert.Zero(t, logBufferDropped.Load(), "no row may be dropped while the buffer is under its bound")
 
 	var stored, distinct int64
 	require.NoError(t, db.Model(&Log{}).Where("request_id LIKE ?", "rid-%").Count(&stored).Error)
@@ -444,7 +444,7 @@ func TestClickHouseFailedBatchIsRetriedWithoutDuplicating(t *testing.T) {
 	flushLogBuffer()
 	require.Len(t, logBufferRows, rows, "a failed batch must stay buffered")
 	assert.Equal(t, 1, logFlushFailures, "the failed flush must be counted")
-	assert.EqualValues(t, 0, logBufferDropped, "a flushed-and-failed batch is retained, not dropped")
+	assert.EqualValues(t, 0, logBufferDropped.Load(), "a flushed-and-failed batch is retained, not dropped")
 
 	var beforeRetry int64
 	require.NoError(t, db.Raw("SELECT count() FROM system.tables WHERE database = currentDatabase() AND name = 'logs'").Scan(&beforeRetry).Error)
@@ -457,7 +457,7 @@ func TestClickHouseFailedBatchIsRetriedWithoutDuplicating(t *testing.T) {
 	var stored int64
 	require.NoError(t, db.Raw("SELECT count() FROM logs WHERE request_id = ?", "rid-retried").Scan(&stored).Error)
 	assert.EqualValues(t, rows, stored, "the retried batch must land exactly once, with no duplicates")
-	assert.Zero(t, logBufferDropped)
+	assert.Zero(t, logBufferDropped.Load())
 }
 
 // TestLogBufferDropsBatchAfterRepeatedFlushFailures covers the other half of the
@@ -480,7 +480,7 @@ func TestLogBufferDropsBatchAfterRepeatedFlushFailures(t *testing.T) {
 	// The final attempt gives up on the batch and releases the buffer.
 	flushLogBuffer()
 	assert.Empty(t, logBufferRows, "the batch must be released once the attempts are exhausted")
-	assert.EqualValues(t, 1, logBufferDropped, "the dropped batch must be counted")
+	assert.EqualValues(t, 1, logBufferDropped.Load(), "the dropped batch must be counted")
 	assert.Zero(t, logFlushFailures, "the failure counter restarts with the next batch")
 }
 
@@ -583,10 +583,10 @@ func TestLogBufferFlushesWholeBufferOnShutdown(t *testing.T) {
 
 	var stored int64
 	require.NoError(t, db.Raw("SELECT count() FROM logs WHERE request_id = ?", "rid-shutdown-drain").Scan(&stored).Error)
-	t.Logf("shutdown drain: enqueued=%d stored=%d buffered=%d dropped=%d", rows, stored, len(logBufferRows), logBufferDropped)
+	t.Logf("shutdown drain: enqueued=%d stored=%d buffered=%d dropped=%d", rows, stored, len(logBufferRows), logBufferDropped.Load())
 	assert.EqualValues(t, rows, stored, "a graceful shutdown must drain the whole buffer, not just the first batch")
 	assert.Equal(t, 0, len(logBufferRows), "the buffer must be empty once the shutdown drain is done")
-	assert.Zero(t, logBufferDropped)
+	assert.Zero(t, logBufferDropped.Load())
 }
 
 // TestLogBufferReportsRowsItCannotFlushOnShutdown covers the other half of the
@@ -614,7 +614,7 @@ func TestLogBufferReportsRowsItCannotFlushOnShutdown(t *testing.T) {
 	assert.Contains(t, output.String(), fmt.Sprintf("shutting down with %d buffered log rows that could not be written", rows),
 		"rows the shutdown drain cannot write must be reported, not silently dropped")
 	assert.Len(t, logBufferRows, rows, "the refused batch must be retained until the process exits")
-	assert.Zero(t, logBufferDropped, "a batch that is retained is not a dropped row")
+	assert.Zero(t, logBufferDropped.Load(), "a batch that is retained is not a dropped row")
 }
 
 // TestLogBufferStartLogFlushIsIdempotent covers the lifecycle guard: starting
@@ -659,7 +659,7 @@ func TestLogBufferReportsEveryDroppedBatch(t *testing.T) {
 		addDroppedLogRows(logFlushBatchSize)
 	}
 	reports := strings.Count(output.String(), "log rows dropped so far")
-	t.Logf("dropped=%d reports=%d", logBufferDropped, reports)
-	assert.EqualValues(t, 1+5*logFlushBatchSize, logBufferDropped)
+	t.Logf("dropped=%d reports=%d", logBufferDropped.Load(), reports)
+	assert.EqualValues(t, 1+5*logFlushBatchSize, logBufferDropped.Load())
 	assert.Equal(t, 6, reports, "every dropped batch after the first must be reported")
 }

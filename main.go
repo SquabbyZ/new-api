@@ -247,6 +247,8 @@ func main() {
 	// The consumer stops before model.CloseDB's deferred call, because it writes
 	// through the log database handle.
 	model.StopLogKafka()
+	// 关闭 metrics 端点；轮询器已随 StopLogKafka 停止（它共用消费者的 client）
+	model.StopLogMetrics()
 	// 刷写已入队的日志，避免正常关闭丢失缓冲中的日志
 	model.StopLogFlush()
 	common.SysLog("server exited")
@@ -358,6 +360,14 @@ func InitResources() error {
 	// unreachable is not fatal, but a Kafka-only misconfiguration is, so this
 	// returns an error and the startup below reports it.
 	if err = model.StartLogKafka(); err != nil {
+		return err
+	}
+
+	// Serve the log pipeline's metrics when METRICS_ADDR is set. It is off by
+	// default, so an upgrade that does not set it opens no new port; a
+	// malformed address fails startup rather than silently binding every
+	// interface.
+	if err = model.StartLogMetrics(); err != nil {
 		return err
 	}
 

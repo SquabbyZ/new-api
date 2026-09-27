@@ -187,7 +187,7 @@ func TestCreateLogWithoutKafkaWritesTheSameStatementAsBefore(t *testing.T) {
 		baselineClickHouseLogRow(1700000001, "rid-baseline-2")
 	assert.Equal(t, expected, statements[0],
 		"without KAFKA_BROKERS the ClickHouse write path must produce the pre-change statement byte for byte")
-	assert.Zero(t, logBufferDropped)
+	assert.Zero(t, logBufferDropped.Load())
 }
 
 // TestLogKafkaPayloadRoundTripKeepsEveryField covers the billing audit

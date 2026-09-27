@@ -141,6 +141,13 @@ func (p *Producer) Healthy() bool {
 	return p.inFlight.Load() <= p.lowWater
 }
 
+// SpoolSnapshot reads the disk fallback's counters. The spool is the producer's,
+// so this is the only place an observer can reach it, and it is safe to call
+// while the producer is delivering.
+func (p *Producer) SpoolSnapshot() SpoolSnapshot {
+	return p.spool.Snapshot()
+}
+
 // delivered is the per-record delivery callback of the request path, and it is
 // the only entry in the package that writes to the disk.
 func (p *Producer) delivered(record *kgo.Record, err error) {

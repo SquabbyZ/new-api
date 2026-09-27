@@ -125,6 +125,11 @@ func startLogKafkaConsumer(cfg logkafka.Config) error {
 func StopLogKafka() {
 	logKafkaStopOnce.Do(func() {
 		stopLogKafkaProducer()
+		// The metrics poller issues its requests through the consumer's client,
+		// so it stops before that client does. Closing the client under a poll
+		// in flight would produce a "client closed" error during an orderly
+		// shutdown, which is indistinguishable from a fault in the log.
+		stopLogMetricsPoll()
 		stopLogKafkaConsumer()
 	})
 }

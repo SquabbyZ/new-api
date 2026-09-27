@@ -91,8 +91,10 @@ type Spool struct {
 	// totalBytes is the writer's running account of the directory. It is
 	// incremented on every append and recomputed by a directory scan at every
 	// seal, which is what heals the drift the replayer's unlinks otherwise
-	// introduce. Only the writer touches it.
-	totalBytes int64
+	// introduce. Only the writer mutates it, but it is atomic because the
+	// metrics collector reads it from another goroutine: a plain int64 read
+	// there is a data race even though the writer never sees one.
+	totalBytes atomic.Int64
 
 	closing   chan struct{}
 	stopped   chan struct{}
@@ -372,7 +374,7 @@ func (s *Spool) appendToActive(payload []byte) error {
 	line = append(line, '\n')
 	written, err := s.activeFile.Write(line)
 	s.activeSize += int64(written)
-	s.totalBytes += int64(written)
+	s.totalBytes.Add(int64(written))
 	if err != nil {
 		return err
 	}
@@ -459,7 +461,7 @@ func (s *Spool) sealActive() {
 	}
 
 	s.activePath.Store("")
-	s.totalBytes = s.directoryBytes()
+	s.totalBytes.Store(s.directoryBytes())
 }
 
 // directoryBytes sums the size of every segment file, which is the authoritative
@@ -471,7 +473,7 @@ func (s *Spool) directoryBytes() int64 {
 	if err != nil {
 		s.writeFailed.Add(1)
 		s.report(fmt.Sprintf("the kafka log spool could not read %s to account for its size: %s", s.dir, err))
-		return s.totalBytes
+		return s.totalBytes.Load()
 	}
 	var total int64
 	for _, entry := range entries {
@@ -493,13 +495,13 @@ func (s *Spool) directoryBytes() int64 {
 // makeRoom evicts whole sealed segments, oldest first, until the extra bytes fit
 // under the capacity. It reports whether they now fit.
 func (s *Spool) makeRoom(extra int64) bool {
-	if s.totalBytes+extra <= s.maxBytes {
+	if s.totalBytes.Load()+extra <= s.maxBytes {
 		return true
 	}
 	segments := s.sealedSegmentsOldestFirst()
 	var evictedSegments, evictedRows, evictedBytes, failed int64
 	for _, segment := range segments {
-		if s.totalBytes+extra <= s.maxBytes {
+		if s.totalBytes.Load()+extra <= s.maxBytes {
 			break
 		}
 		info, err := os.Stat(segment)
@@ -524,7 +526,7 @@ func (s *Spool) makeRoom(extra int64) bool {
 		evictedSegments++
 		evictedRows += rows
 		evictedBytes += info.Size()
-		s.totalBytes -= info.Size()
+		s.totalBytes.Add(-info.Size())
 	}
 	if evictedSegments > 0 || failed > 0 {
 		s.evictedSegments.Add(evictedSegments)
@@ -534,7 +536,7 @@ func (s *Spool) makeRoom(extra int64) bool {
 		s.report(fmt.Sprintf("the kafka log spool reached KAFKA_LOG_SPOOL_MAX_BYTES=%d and dropped the %d oldest sealed segment(s) (%d row(s), %d byte(s)); %d segment(s) could not be removed",
 			s.maxBytes, evictedSegments, evictedRows, evictedBytes, failed))
 	}
-	return s.totalBytes+extra <= s.maxBytes
+	return s.totalBytes.Load()+extra <= s.maxBytes
 }
 
 // enforceRetention drops sealed segments whose name says they are older than the
@@ -758,6 +760,44 @@ func (s *Spool) StopReplay() {
 // precondition an experiment needs in place of a fixed wait before it kills the
 // process mid-replay.
 func (s *Spool) Replaying() bool { return s.replaying.Load() }
+
+// SpoolSnapshot is a read-only view of the disk fallback's counters and load.
+// The metrics collector reads it from another goroutine, so every field is
+// loaded from an atomic; the type exists so that collector never reaches into
+// the spool and the transport package never depends on a metrics library.
+type SpoolSnapshot struct {
+	// Bytes is the writer's running account of the directory, the same value
+	// the capacity decision uses.
+	Bytes int64
+	// Rows the request path handed to the spool (not the same as rows written:
+	// a handed-over row can still fail its write).
+	StashedRows int64
+	// Rows refused or lost without ever being written: a raw newline in the
+	// payload, a full queue, a failed write, or a row that arrived after Close.
+	RejectedRows int64
+	DroppedRows  int64
+	// Rows removed by capacity eviction, retention, or a torn tail.
+	EvictedRows int64
+	ExpiredRows int64
+	TornRows    int64
+	// Replay attempts that failed and were counted.
+	ReplayFailed int64
+}
+
+// Snapshot reads the spool's counters. It is safe to call from any goroutine
+// while the writer is running.
+func (s *Spool) Snapshot() SpoolSnapshot {
+	return SpoolSnapshot{
+		Bytes:        s.totalBytes.Load(),
+		StashedRows:  s.stashedRows.Load(),
+		RejectedRows: s.rejectedRows.Load(),
+		DroppedRows:  s.droppedRows.Load(),
+		EvictedRows:  s.evictedRows.Load(),
+		ExpiredRows:  s.expiredRows.Load(),
+		TornRows:     s.tornRows.Load(),
+		ReplayFailed: s.replayFailed.Load(),
+	}
+}
 
 // Close stops the writer, writing what is already queued and sealing the active
 // segment. A spool that is not empty is left on the disk on purpose: the next

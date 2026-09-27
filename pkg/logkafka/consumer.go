@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,8 @@ import (
 type Consumer struct {
 	client         *kgo.Client
 	topic          string
+	groupID        string
+	retentionHours int
 	batchSize      int
 	flushInterval  time.Duration
 	requestTimeout time.Duration
@@ -32,6 +35,16 @@ type Consumer struct {
 	// pending is the batch that has been fetched and not yet written. It is
 	// touched only by Run, so it needs no lock.
 	pending []*kgo.Record
+
+	// lastConsumedAt is, per partition, the timestamp of the newest record this
+	// consumer has written. It is the process's half of the time lag: the other
+	// half is the log-end timestamp the broker poll returns, and subtracting
+	// them is the only way to get seconds, which no offset arithmetic yields.
+	// Run writes it and the metrics collector reads it, so it is behind a
+	// mutex; a partition with no entry has never been consumed and is reported
+	// as absent rather than as zero lag.
+	lastConsumedMu sync.Mutex
+	lastConsumedAt map[int32]time.Time
 
 	written      atomic.Int64
 	writeFailed  atomic.Int64
@@ -58,10 +71,13 @@ func NewConsumer(cfg Config, handle func(rows [][]byte) error) (*Consumer, error
 	return &Consumer{
 		client:         client,
 		topic:          cfg.Topic,
+		groupID:        cfg.GroupID,
+		retentionHours: cfg.RetentionHours,
 		batchSize:      cfg.ConsumerBatchSize,
 		flushInterval:  flushInterval,
 		requestTimeout: cfg.RequestTimeout,
 		handle:         handle,
+		lastConsumedAt: make(map[int32]time.Time),
 	}, nil
 }
 
@@ -161,6 +177,7 @@ func (c *Consumer) flush(ctx context.Context) bool {
 		return false
 	}
 	c.written.Add(int64(len(rows)))
+	c.recordConsumed(c.pending)
 
 	if err := c.client.CommitRecords(ctx, c.pending...); err != nil {
 		// The rows are already in the database, so a failed commit only means
@@ -183,6 +200,49 @@ func (c *Consumer) Close() {
 			common.SysLog(fmt.Sprintf("kafka log consumer stopped: %d row(s) written, %d batch write failure(s), %d offset commit failure(s)", written, failed, commits))
 		}
 	})
+}
+
+// recordConsumed keeps the newest record timestamp seen per partition. It runs
+// on the Run goroutine, and the metrics collector reads the map through
+// lastConsumed for the time lag, so both sides take the mutex.
+func (c *Consumer) recordConsumed(records []*kgo.Record) {
+	c.lastConsumedMu.Lock()
+	defer c.lastConsumedMu.Unlock()
+	for _, record := range records {
+		if previous, ok := c.lastConsumedAt[record.Partition]; !ok || record.Timestamp.After(previous) {
+			c.lastConsumedAt[record.Partition] = record.Timestamp
+		}
+	}
+}
+
+// lastConsumed copies the per-partition newest-consumed timestamps. A partition
+// with no entry has never been consumed by this process.
+func (c *Consumer) lastConsumed() map[int32]time.Time {
+	c.lastConsumedMu.Lock()
+	defer c.lastConsumedMu.Unlock()
+	out := make(map[int32]time.Time, len(c.lastConsumedAt))
+	maps.Copy(out, c.lastConsumedAt)
+	return out
+}
+
+// ConsumerSnapshot is a read-only view of the consumer's counters. WrittenRows
+// is deliberately not a metric of its own -- stashedRows and the lag pair cover
+// the same events -- but it is what proves, in a test, that a drained topic
+// really passed through this consumer.
+type ConsumerSnapshot struct {
+	WrittenRows  int64
+	WriteFailed  int64
+	CommitFailed int64
+}
+
+// Snapshot reads the consumer's counters. It is safe to call from any goroutine
+// while Run is consuming.
+func (c *Consumer) Snapshot() ConsumerSnapshot {
+	return ConsumerSnapshot{
+		WrittenRows:  c.written.Load(),
+		WriteFailed:  c.writeFailed.Load(),
+		CommitFailed: c.commitFailed.Load(),
+	}
 }
 
 // reportFetchError surfaces one partition error. A topic that does not exist

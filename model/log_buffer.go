@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -50,9 +51,13 @@ const (
 )
 
 var (
-	logBufferMu      sync.Mutex
-	logBufferRows    []*Log
-	logBufferDropped int64
+	logBufferMu   sync.Mutex
+	logBufferRows []*Log
+	// logBufferDropped is atomic because the metrics collector reads it from
+	// the scrape goroutine while enqueueLog writes it from a request. The
+	// mutex still guards the compound reads below, so the log line and the
+	// metric report the same number.
+	logBufferDropped atomic.Int64
 	// logDropReported is the drop count as of the last report. The next report is
 	// driven by the increase since then rather than by the absolute count: rows
 	// are also dropped a whole batch at a time, and a batch-sized step can land
@@ -164,8 +169,7 @@ func logFlushInterval() time.Duration {
 func enqueueLog(log *Log) {
 	logBufferMu.Lock()
 	if len(logBufferRows) >= logBufferCapacity {
-		logBufferDropped++
-		dropped := logBufferDropped
+		dropped := logBufferDropped.Add(1)
 		logBufferMu.Unlock()
 		reportDroppedLogRows(dropped)
 		return
@@ -210,8 +214,7 @@ func requeueLogBuffer(batch []*Log) {
 		dropped = int64(len(rows) - logBufferCapacity)
 		rows = rows[:logBufferCapacity]
 	}
-	logBufferDropped += dropped
-	totalDropped := logBufferDropped
+	totalDropped := logBufferDropped.Add(dropped)
 	logBufferRows = rows
 	logBufferMu.Unlock()
 
@@ -222,8 +225,7 @@ func requeueLogBuffer(batch []*Log) {
 
 func addDroppedLogRows(n int64) {
 	logBufferMu.Lock()
-	logBufferDropped += n
-	total := logBufferDropped
+	total := logBufferDropped.Add(n)
 	logBufferMu.Unlock()
 	reportDroppedLogRows(total)
 }
