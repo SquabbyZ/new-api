@@ -11,9 +11,10 @@ import (
 )
 
 type Setup struct {
-	Status       bool   `json:"status"`
-	RootInit     bool   `json:"root_init"`
-	DatabaseType string `json:"database_type"`
+	Status          bool   `json:"status"`
+	RootInit        bool   `json:"root_init"`
+	DatabaseType    string `json:"database_type"`
+	LogDatabaseType string `json:"log_database_type"`
 }
 
 type SetupRequest struct {
@@ -37,6 +38,7 @@ func GetSetup(c *gin.Context) {
 	}
 	setup.RootInit = model.RootUserExists()
 	setup.DatabaseType = string(common.MainDatabaseType())
+	setup.LogDatabaseType = string(common.LogDatabaseType())
 	c.JSON(200, gin.H{
 		"success": true,
 		"data":    setup,

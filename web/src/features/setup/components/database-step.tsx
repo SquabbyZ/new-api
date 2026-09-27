@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Database, HardDrive, Server } from 'lucide-react'
+import { Database, HardDrive, Layers, Server } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { StatusBadge } from '@/components/status-badge'
@@ -54,6 +54,12 @@ const DATABASE_META: Record<
       'PostgreSQL offers advanced reliability and data integrity for production workloads.',
     variant: 'success',
   },
+  clickhouse: {
+    label: 'ClickHouse',
+    descriptionKey:
+      'ClickHouse stores logs and analytics data. Business and billing data stay in the primary database.',
+    variant: 'info',
+  },
 }
 
 function resolveDatabaseMeta(type?: string) {
@@ -71,6 +77,13 @@ function resolveDatabaseMeta(type?: string) {
 export function DatabaseStep({ status }: DatabaseStepProps) {
   const { t } = useTranslation()
   const meta = resolveDatabaseMeta(status?.database_type)
+  // The log database is only worth a second block when it differs from the
+  // primary one: an unset LOG_SQL_DSN makes both types identical, and the
+  // default deployment must keep rendering exactly the block above.
+  const mainType = status?.database_type?.trim().toLowerCase() ?? ''
+  const logType = status?.log_database_type?.trim().toLowerCase() ?? ''
+  const logMeta =
+    logType !== '' && logType !== mainType ? resolveDatabaseMeta(logType) : null
   const electronApi =
     typeof window !== 'undefined'
       ? ((window as unknown as Record<string, unknown>)?.electron as
@@ -160,6 +173,45 @@ export function DatabaseStep({ status }: DatabaseStepProps) {
             )}
           </AlertDescription>
         </Alert>
+      )}
+
+      {logMeta && (
+        <>
+          <div className='bg-card flex items-center justify-between rounded-lg border p-4'>
+            <div className='space-y-1'>
+              <p className='text-muted-foreground text-sm font-medium'>
+                {t('Detected log database')}
+              </p>
+              <p className='text-foreground text-base font-semibold'>
+                {logMeta.label}
+              </p>
+              <p className='text-muted-foreground text-sm'>
+                {t(logMeta.descriptionKey)}
+              </p>
+            </div>
+            <StatusBadge
+              label={logMeta.label}
+              variant={logMeta.variant}
+              className='cursor-default'
+              copyable={false}
+              icon={Database}
+            />
+          </div>
+
+          {logType === 'clickhouse' && (
+            <Alert className='border-violet-200 bg-violet-50 dark:border-violet-900/60 dark:bg-violet-950/40'>
+              <AlertTitle className='flex items-center gap-2'>
+                <Layers className='size-4 text-violet-500' />
+                {t('ClickHouse log database detected')}
+              </AlertTitle>
+              <AlertDescription>
+                {t(
+                  'ClickHouse is optimized for high-volume log queries. Plan log table retention and disk usage, and keep business and billing data in the primary database.'
+                )}
+              </AlertDescription>
+            </Alert>
+          )}
+        </>
       )}
     </div>
   )

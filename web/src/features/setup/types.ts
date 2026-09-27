@@ -22,6 +22,9 @@ export interface SetupStatus {
   status: boolean
   root_init: boolean
   database_type: string
+  // Absent on already-initialized backends and on backends older than the
+  // log-database field; both cases must render as "no log database reported".
+  log_database_type?: string
   // Some backends also echo mode flags; they are optional here.
   SelfUseModeEnabled?: boolean
   DemoSiteEnabled?: boolean
