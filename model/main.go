@@ -337,6 +337,11 @@ func migrateDB() error {
 	if err := migratePrefillGroupUniqueness(DB); err != nil {
 		return err
 	}
+	// 必须排在下面的 DB.AutoMigrate(&QuotaData{}) 之前：AutoMigrate 会为该表的
+	// 唯一索引发出 CreateIndex，而表里只要还有重复行，那一句就会失败并终止启动。
+	if err := migrateQuotaDataUniqueness(DB); err != nil {
+		return err
+	}
 	// Migrate price_amount column from float/double to decimal for existing tables
 	migrateSubscriptionPlanPriceAmount()
 	// Migrate model_limits column from varchar to text for existing tables

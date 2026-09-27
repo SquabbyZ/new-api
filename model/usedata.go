@@ -1,26 +1,43 @@
 package model
 
 import (
-	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// quotaDataBusinessKeyIndex 是 8 列业务键的唯一索引名。模型 tag、迁移里的
+// Migrator().CreateIndex 与测试断言三处必须完全一致，否则既有库上会出现两个索引。
+const quotaDataBusinessKeyIndex = "idx_qdt_business_key"
+
+// quotaDataBusinessKeyColumns 是 quota_data 的业务键，按顺序等于
+// quotaDataBusinessKeyIndex 的列顺序，也是落库 upsert 的冲突目标与去重迁移的分组键。
+var quotaDataBusinessKeyColumns = []string{
+	"user_id",
+	"username",
+	"model_name",
+	"created_at",
+	"use_group",
+	"token_id",
+	"channel_id",
+	"node_name",
+}
 
 // QuotaData 柱状图数据
 type QuotaData struct {
 	Id        int    `json:"id"`
-	UserID    int    `json:"user_id" gorm:"index"`
-	Username  string `json:"username" gorm:"index:idx_qdt_model_user_name,priority:2;size:64;default:''"`
-	ModelName string `json:"model_name" gorm:"index:idx_qdt_model_user_name,priority:1;size:64;default:''"`
-	CreatedAt int64  `json:"created_at" gorm:"bigint;index:idx_qdt_created_at,priority:2"`
-	UseGroup  string `json:"use_group" gorm:"index;size:64;default:''"`
-	TokenID   int    `json:"token_id" gorm:"index;default:0"`
-	ChannelID int    `json:"channel_id" gorm:"index;default:0"`
-	NodeName  string `json:"node_name" gorm:"index;size:64;default:''"`
+	UserID    int    `json:"user_id" gorm:"index;uniqueIndex:idx_qdt_business_key,priority:1"`
+	Username  string `json:"username" gorm:"index:idx_qdt_model_user_name,priority:2;uniqueIndex:idx_qdt_business_key,priority:2;size:64;default:''"`
+	ModelName string `json:"model_name" gorm:"index:idx_qdt_model_user_name,priority:1;uniqueIndex:idx_qdt_business_key,priority:3;size:64;default:''"`
+	CreatedAt int64  `json:"created_at" gorm:"bigint;index:idx_qdt_created_at,priority:2;uniqueIndex:idx_qdt_business_key,priority:4"`
+	UseGroup  string `json:"use_group" gorm:"index;uniqueIndex:idx_qdt_business_key,priority:5;size:64;default:''"`
+	TokenID   int    `json:"token_id" gorm:"index;uniqueIndex:idx_qdt_business_key,priority:6;default:0"`
+	ChannelID int    `json:"channel_id" gorm:"index;uniqueIndex:idx_qdt_business_key,priority:7;default:0"`
+	NodeName  string `json:"node_name" gorm:"index;uniqueIndex:idx_qdt_business_key,priority:8;size:64;default:''"`
 	TokenUsed int    `json:"token_used" gorm:"default:0"`
 	Count     int    `json:"count" gorm:"default:0"`
 	Quota     int    `json:"quota" gorm:"default:0"`
@@ -102,32 +119,23 @@ func SaveQuotaDataCache() {
 	CacheQuotaDataLock.Lock()
 	defer CacheQuotaDataLock.Unlock()
 	size := len(CacheQuotaData)
-	// 如果缓存中有数据，就保存到数据库中
-	// 1. 先查询数据库中是否有数据
-	// 2. 如果有数据，就更新数据
-	// 3. 如果没有数据，就插入数据
+	// 缓存里已经按业务键求和过的值通过一条 upsert 落库：同键无行时插入，有行时按
+	// 表限定列相加。单条语句不再有「先探测、都读到无行、再都插入」的交错窗口，
+	// 配合数据库上的唯一索引，同一业务键最多只有一行。
+	conflictColumns := make([]clause.Column, 0, len(quotaDataBusinessKeyColumns))
+	for _, name := range quotaDataBusinessKeyColumns {
+		conflictColumns = append(conflictColumns, clause.Column{Name: name})
+	}
 	failed := 0
 	for key, quotaData := range CacheQuotaData {
-		quotaDataDB := &QuotaData{}
-		lookupErr := DB.Table("quota_data").
-			Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
-				quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
-			First(quotaDataDB).Error
-		var err error
-		if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
-			// 探测本身失败（连接中断、超时等）时无法判断该键是否已有行；若继续走 Create，
-			// 会给一个已存在的键插入重复行，看板把它当成两笔数据重复计数。探测失败与
-			// 「记录不存在」必须分开：只有后者才是新键的合法插入路径，探测失败按失败处理，
-			// 键留在缓存里等下次刷写。
-			err = lookupErr
-		} else if quotaDataDB.Id > 0 {
-			//quotaDataDB.Count += quotaData.Count
-			//quotaDataDB.Quota += quotaData.Quota
-			//DB.Table("quota_data").Save(quotaDataDB)
-			err = increaseQuotaData(quotaData)
-		} else {
-			err = DB.Table("quota_data").Create(quotaData).Error
-		}
+		err := DB.Table("quota_data").Clauses(clause.OnConflict{
+			Columns: conflictColumns,
+			DoUpdates: clause.Assignments(map[string]any{
+				"count":      gorm.Expr("quota_data.count + ?", quotaData.Count),
+				"quota":      gorm.Expr("quota_data.quota + ?", quotaData.Quota),
+				"token_used": gorm.Expr("quota_data.token_used + ?", quotaData.TokenUsed),
+			}),
+		}).Create(quotaData).Error
 		// 写入失败的键保留在缓存中，等待下次刷写；只有成功落库的键才移除，
 		// 否则这一轮累积的看板数据会随缓存清空一起丢失。
 		if err != nil {
@@ -141,17 +149,6 @@ func SaveQuotaDataCache() {
 	if failed == 0 {
 		common.SysLog(fmt.Sprintf("保存数据看板数据成功，共保存%d条数据", size))
 	}
-}
-
-func increaseQuotaData(quotaData *QuotaData) error {
-	return DB.Table("quota_data").
-		Where("user_id = ? and username = ? and model_name = ? and created_at = ? and use_group = ? and token_id = ? and channel_id = ? and node_name = ?",
-			quotaData.UserID, quotaData.Username, quotaData.ModelName, quotaData.CreatedAt, quotaData.UseGroup, quotaData.TokenID, quotaData.ChannelID, quotaData.NodeName).
-		Updates(map[string]any{
-			"count":      gorm.Expr("count + ?", quotaData.Count),
-			"quota":      gorm.Expr("quota + ?", quotaData.Quota),
-			"token_used": gorm.Expr("token_used + ?", quotaData.TokenUsed),
-		}).Error
 }
 
 func GetQuotaDataByUsername(username string, startTime int64, endTime int64) (quotaData []*QuotaData, err error) {

@@ -1,7 +1,6 @@
 package model
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -31,7 +30,7 @@ func migrateOptionPrimaryKey(db *gorm.DB) error {
 	if unique {
 		return nil
 	}
-	return withOptionPrimaryKeyLock(db, func(locked *gorm.DB) error {
+	return withMigrationLock(db, optionPrimaryKeyLockName, optionPrimaryKeyLockID, func(locked *gorm.DB) error {
 		unique, err := optionsKeyIsUnique(locked)
 		if err != nil {
 			return err
@@ -77,42 +76,6 @@ WHERE constraint_meta.conrelid = to_regclass('options')
 		return false, fmt.Errorf("inspect options constraints: %w", err)
 	}
 	return count > 0, nil
-}
-
-func withOptionPrimaryKeyLock(db *gorm.DB, fn func(*gorm.DB) error) error {
-	switch db.Dialector.Name() {
-	case "mysql":
-		sqlDB, err := db.DB()
-		if err != nil {
-			return fmt.Errorf("lock options table: %w", err)
-		}
-		ctx := context.Background()
-		conn, err := sqlDB.Conn(ctx)
-		if err != nil {
-			return fmt.Errorf("lock options table: %w", err)
-		}
-		defer conn.Close()
-		var acquired int
-		if err := conn.QueryRowContext(ctx, "SELECT GET_LOCK(?, 60)", optionPrimaryKeyLockName).Scan(&acquired); err != nil {
-			return fmt.Errorf("lock options table: %w", err)
-		}
-		if acquired != 1 {
-			return fmt.Errorf("lock options table: timeout")
-		}
-		defer conn.ExecContext(ctx, "SELECT RELEASE_LOCK(?)", optionPrimaryKeyLockName)
-		return fn(db)
-	case "postgres":
-		return db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Exec("SELECT pg_advisory_xact_lock(?)", optionPrimaryKeyLockID).Error; err != nil {
-				return fmt.Errorf("lock options table: %w", err)
-			}
-			return fn(tx)
-		})
-	default:
-		return db.Transaction(func(tx *gorm.DB) error {
-			return fn(tx)
-		})
-	}
 }
 
 func repairOptionPrimaryKey(db *gorm.DB) error {
