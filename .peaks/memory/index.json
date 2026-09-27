@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-27T02:50:34.637Z",
+  "updatedAt": "2026-09-27T03:32:46.671Z",
   "hot": {
     "rule": [],
     "decision": [
@@ -42,6 +42,14 @@
     ],
     "module": [],
     "lesson": [
+      {
+        "name": "clickhouse-narrow-column-wraps-silently",
+        "kind": "lesson",
+        "description": "ClickHouse 在把超出目标列范围的值写入**更窄**的类型时，**静默回绕**而非报错 —— 这与「数据库会拒绝非法值」的直觉相反，且回绕后的值看起来是合法数据。 实测（ClickHouse 24.8.14.39，经真实 GO...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\clickhouse-narrow-column-wraps-silently.md",
+        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-clickhouse-job.md",
+        "updatedAt": "2026-09-27"
+      },
       {
         "name": "clickhouse-sort-key-cannot-be-altered-in-place",
         "kind": "lesson",
@@ -113,6 +121,22 @@
         "sourcePath": "D:\\new-api\\.peaks\\memory\\schema-equivalence-not-file-md5.md",
         "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-job.md",
         "updatedAt": "2026-09-26"
+      },
+      {
+        "name": "skipping-index-benefit-formula",
+        "kind": "lesson",
+        "description": "给 ClickHouse 的 MergeTree 加跳数索引（skipping index）前，先按公式估收益，不要凭「加了索引就会快」下结论。 **边界公式**：granule 内 G 行、被索引列基数 U 时，无法排除该 gran...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\skipping-index-benefit-formula.md",
+        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-clickhouse-job.md",
+        "updatedAt": "2026-09-27"
+      },
+      {
+        "name": "startup-ddl-must-be-idempotent-concurrent-masters",
+        "kind": "lesson",
+        "description": "本项目  —— **未设置时默认全部节点都是 master**。因此**多个节点会并发执行启动期迁移**，启动路径里的每一条 DDL 都必须写成幂等形式，否则会变成「默认部署即崩」。 实测（slice rid-ch-s5）：Click...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\startup-ddl-must-be-idempotent-concurrent-masters.md",
+        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-clickhouse-job.md",
+        "updatedAt": "2026-09-27"
       }
     ],
     "bug": [],
