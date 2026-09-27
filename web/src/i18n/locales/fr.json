@@ -3246,6 +3246,7 @@
     "Log cleanup": "Nettoyage des journaux",
     "Log cleanup progress": "Progression du nettoyage des journaux",
     "Log cleanup task started.": "La tâche de nettoyage des journaux a démarré.",
+    "Log database": "Base de données des journaux",
     "Log Details": "Détails du journal",
     "Log Directory": "Répertoire des journaux",
     "Log File Count": "Nombre de fichiers journaux",

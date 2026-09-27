@@ -42,6 +42,7 @@ const DATABASE_VARIANT: Record<
   sqlite: 'warning',
   mysql: 'success',
   postgres: 'success',
+  clickhouse: 'info',
 }
 
 export function CompleteStep({ status, values }: CompleteStepProps) {
@@ -49,6 +50,14 @@ export function CompleteStep({ status, values }: CompleteStepProps) {
   const usageLabelKey = USAGE_MODE_LABEL_KEYS[values.usageMode]
   const dbType = status?.database_type ?? 'Unknown'
   const databaseVariant = DATABASE_VARIANT[dbType.toLowerCase()] ?? 'neutral'
+  // The log database earns its own row only when it differs from the primary
+  // one: an unset LOG_SQL_DSN makes both types identical, and the default
+  // deployment must keep rendering exactly the rows above.
+  const mainType = status?.database_type?.trim().toLowerCase() ?? ''
+  const logDatabaseType = status?.log_database_type?.trim() ?? ''
+  const logType = logDatabaseType.toLowerCase()
+  const showLogDatabase = logType !== '' && logType !== mainType
+  const logDatabaseVariant = DATABASE_VARIANT[logType] ?? 'neutral'
 
   return (
     <div className='flex flex-col items-center gap-6 text-center'>
@@ -81,6 +90,28 @@ export function CompleteStep({ status, values }: CompleteStepProps) {
               />
             </dd>
           </div>
+
+          {showLogDatabase && (
+            <>
+              <Separator />
+
+              <div className='space-y-1.5'>
+                <dt className='text-muted-foreground text-xs font-medium tracking-wide uppercase'>
+                  {t('Log database')}
+                </dt>
+                <dd className='flex flex-wrap items-center gap-2'>
+                  <span className='text-sm font-semibold'>
+                    {logDatabaseType}
+                  </span>
+                  <StatusBadge
+                    label={logDatabaseType}
+                    variant={logDatabaseVariant}
+                    copyable={false}
+                  />
+                </dd>
+              </div>
+            </>
+          )}
 
           <Separator />
 

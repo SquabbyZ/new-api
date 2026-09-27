@@ -3246,6 +3246,7 @@
     "Log cleanup": "Очистка журналов",
     "Log cleanup progress": "Ход очистки журнала",
     "Log cleanup task started.": "Задача очистки журнала запущена.",
+    "Log database": "База данных журналов",
     "Log Details": "Детали журнала",
     "Log Directory": "Каталог журналов",
     "Log File Count": "Кол-во файлов журналов",
