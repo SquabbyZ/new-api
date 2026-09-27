@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-27T01:45:50.556Z",
+  "updatedAt": "2026-09-27T02:50:34.637Z",
   "hot": {
     "rule": [],
     "decision": [
@@ -81,6 +81,14 @@
         "sourcePath": "D:\\new-api\\.peaks\\memory\\multi-node-default-master-migration-race.md",
         "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff.md",
         "updatedAt": "2026-09-26"
+      },
+      {
+        "name": "orchestrator-briefing-errors-need-independent-measurement",
+        "kind": "lesson",
+        "description": "编排器写进派发提示词的技术断言，子代理会当作既有事实采信，很少反问。本项目一个 job 内因此发生了**三次**错误传播，全部由独立测量的复核层捕获： | # | 编排器的错误断言 | 谁捕获 | 实测事实 | |---|---|--...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\orchestrator-briefing-errors-need-independent-measurement.md",
+        "sourceArtifact": null,
+        "updatedAt": "2026-09-27"
       },
       {
         "name": "peaks-runtime-not-gitignored-in-this-project",
