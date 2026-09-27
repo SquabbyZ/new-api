@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-27T06:33:30.809Z",
+  "updatedAt": "2026-09-27T08:13:37.330Z",
   "hot": {
     "rule": [],
     "decision": [
@@ -97,6 +97,14 @@
         "sourcePath": "D:\\new-api\\.peaks\\memory\\gorm-unchecked-first-error-silent-duplicate.md",
         "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-job.md",
         "updatedAt": "2026-09-26"
+      },
+      {
+        "name": "model-tests-drop-live-clickhouse-tables",
+        "kind": "lesson",
+        "description": "一类的测试对 ClickHouse 的写法是： **表名是裸的、库名取 ** —— 也就是  里那个库。所以「DSN 指向哪个库，测试就在哪个库里建表/删表」。 **本会话实际发生过一次**：我把  指成  —— 那正是**运行中的后...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\model-tests-drop-live-clickhouse-tables.md",
+        "sourceArtifact": null,
+        "updatedAt": "2026-09-27"
       },
       {
         "name": "multi-node-default-master-migration-race",
