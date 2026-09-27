@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-26T18:36:20.042Z",
+  "updatedAt": "2026-09-27T01:07:43.282Z",
   "hot": {
     "rule": [],
     "decision": [
@@ -42,6 +42,14 @@
     ],
     "module": [],
     "lesson": [
+      {
+        "name": "clickhouse-sort-key-cannot-be-altered-in-place",
+        "kind": "lesson",
+        "description": "ClickHouse 的 MergeTree 排序键实质无法原地修改。要给日志表的 、 这类过滤列加剪枝能力，正解是加跳数索引，不是改排序键。 在真实 ClickHouse 24.8.14.39 上实测（临时表结构照抄本项目  的 D...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\clickhouse-sort-key-cannot-be-altered-in-place.md",
+        "sourceArtifact": null,
+        "updatedAt": "2026-09-27"
+      },
       {
         "name": "consume-log-write-path-sync-single-row",
         "kind": "lesson",
