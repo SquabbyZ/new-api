@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-27T01:07:43.282Z",
+  "updatedAt": "2026-09-27T01:45:50.556Z",
   "hot": {
     "rule": [],
     "decision": [
@@ -93,10 +93,10 @@
       {
         "name": "reuse-must-check-residual-context",
         "kind": "lesson",
-        "description": "复用上一轮的提示词、约束或结论时，必须逐条确认哪些对当前目标不适用并显式删除，否则残留上下文会误导下游。 本项目 job 中，编排器把上一 slice 的 QA 派发提示词用  替换 rid 后复用，结果**正文里仍带着上一 slic...",
+        "description": "复用上一轮的提示词、约束或结论时，必须逐条确认哪些对当前目标不适用并显式删除，否则残留上下文会误导下游。 **不要  复用提示词 —— 每次重写。** 本项目 job 中，编排器**两次**用  把上一 slice 的 QA 派发提示...",
         "sourcePath": "D:\\new-api\\.peaks\\memory\\reuse-must-check-residual-context.md",
         "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff-job.md",
-        "updatedAt": "2026-09-26"
+        "updatedAt": "2026-09-27"
       },
       {
         "name": "schema-equivalence-not-file-md5",
