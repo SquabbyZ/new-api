@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-27T15:58:15.981Z",
+  "updatedAt": "2026-09-27T23:34:13.002Z",
   "hot": {
     "rule": [],
     "decision": [
@@ -185,7 +185,16 @@
     "project-rule": []
   },
   "warm": {
-    "project": [],
+    "project": [
+      {
+        "name": "log-list-usecase-time-bounded",
+        "kind": "project",
+        "description": "决策方（项目所有者）在 2026-09-27 的会话中确认：**本项目查看日志的场景基本都会选一个时间段**（如「最近 24 小时」），不是「打开页面就看最新几条」的无下界浏览。 **为什么这条业务事实值得单独记：**  的 PRD ...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\log-list-usecase-time-bounded.md",
+        "sourceArtifact": null,
+        "updatedAt": "2026-09-27"
+      }
+    ],
     "reference": [],
     "design": [],
     "handoff": [],
