@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-09-27T03:32:46.671Z",
+  "updatedAt": "2026-09-27T06:33:30.809Z",
   "hot": {
     "rule": [],
     "decision": [
@@ -32,12 +32,28 @@
         "updatedAt": "2026-09-26"
       },
       {
+        "name": "peaks-runtime-is-gitignored-in-this-project",
+        "kind": "convention",
+        "description": "下三类路径的忽略状态**各不相同**，提交前必须分清： | 路径 | 忽略？ | 依据 | 含义 | |---|---|---|---| |  | **是** |  | 评审产物 / handoff / RD / QA 工件不会进 g...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\peaks-runtime-gitignored-in-this-project.md",
+        "sourceArtifact": null,
+        "updatedAt": "2026-09-27"
+      },
+      {
         "name": "perf-metrics-batch-pattern-vs-quota-data",
         "kind": "convention",
         "description": "批量聚合的写入路径应当对齐 pkg/perf_metrics 的模式：热路径只碰内存、定时 drain、失败回填、原子 upsert、计数走 Redis 天然跨节点聚合。quota_data 的写法是反例。  是本仓库**唯一正确的批...",
         "sourcePath": "D:\\new-api\\.peaks\\memory\\pkg-perf-metrics-quota-data.md",
         "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff.md",
         "updatedAt": "2026-09-26"
+      },
+      {
+        "name": "static-i18n-keys-has-no-consumer",
+        "kind": "convention",
+        "description": "导出的 （定义在该文件第 21 行）在**全仓库没有任何消费方**。独立核验两次（编排器 grep + QA 复核）结论一致；其余命中只有三处非消费方引用： 的检索提示、 的约定文字、以及一个测试文件注释。 只在**locale 文件...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\static-i18n-keys-has-no-consumer.md",
+        "sourceArtifact": null,
+        "updatedAt": "2026-09-27"
       }
     ],
     "module": [],
@@ -91,20 +107,20 @@
         "updatedAt": "2026-09-26"
       },
       {
+        "name": "mutation-probe-must-identify-which-assertion-failed",
+        "kind": "lesson",
+        "description": "在 slice （向导审核步骤显示日志库）里，RD 用变异探针证明了新测试有判别力：删掉「日志库与主库不同」这个条件后 **3 failed**。看上去足够了。 QA 随后跑了一个 RD 没跑的变异 —— **把新那一行的  挪到条件...",
+        "sourcePath": "D:\\new-api\\.peaks\\memory\\mutation-probe-must-identify-which-assertion-failed.md",
+        "sourceArtifact": null,
+        "updatedAt": "2026-09-27"
+      },
+      {
         "name": "orchestrator-briefing-errors-need-independent-measurement",
         "kind": "lesson",
         "description": "编排器写进派发提示词的技术断言，子代理会当作既有事实采信，很少反问。本项目一个 job 内因此发生了**三次**错误传播，全部由独立测量的复核层捕获： | # | 编排器的错误断言 | 谁捕获 | 实测事实 | |---|---|--...",
         "sourcePath": "D:\\new-api\\.peaks\\memory\\orchestrator-briefing-errors-need-independent-measurement.md",
         "sourceArtifact": null,
         "updatedAt": "2026-09-27"
-      },
-      {
-        "name": "peaks-runtime-not-gitignored-in-this-project",
-        "kind": "lesson",
-        "description": "本项目没有忽略 peaks 的运行时目录。评审产物、handoff 与 RD 工件都会以未跟踪文件出现在 git status，一次 git add 就会把它们提交进去。  写入的 peaks-loop 托管片段只忽略 、、。实测  ...",
-        "sourcePath": "D:\\new-api\\.peaks\\memory\\peaks-runtime-gitignore-peaks-code-skill.md",
-        "sourceArtifact": ".peaks/_runtime/2026-09-26-session-f5e6af/txt/handoff.md",
-        "updatedAt": "2026-09-26"
       },
       {
         "name": "reuse-must-check-residual-context",
