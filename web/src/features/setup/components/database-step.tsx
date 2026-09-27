@@ -22,56 +22,11 @@ import { useTranslation } from 'react-i18next'
 import { StatusBadge } from '@/components/status-badge'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 
+import { resolveDatabaseMeta } from '../lib/database-meta'
 import type { SetupStatus } from '../types'
 
 interface DatabaseStepProps {
   status?: SetupStatus
-}
-
-const DATABASE_META: Record<
-  string,
-  {
-    label: string
-    descriptionKey: string
-    variant: 'info' | 'success' | 'warning'
-  }
-> = {
-  sqlite: {
-    label: 'SQLite',
-    descriptionKey:
-      'SQLite stores all data in a single file. Make sure that file is persisted when running in containers.',
-    variant: 'warning',
-  },
-  mysql: {
-    label: 'MySQL',
-    descriptionKey:
-      'MySQL is a production-ready relational database. Keep your credentials secure.',
-    variant: 'success',
-  },
-  postgres: {
-    label: 'PostgreSQL',
-    descriptionKey:
-      'PostgreSQL offers advanced reliability and data integrity for production workloads.',
-    variant: 'success',
-  },
-  clickhouse: {
-    label: 'ClickHouse',
-    descriptionKey:
-      'ClickHouse stores logs and analytics data. Business and billing data stay in the primary database.',
-    variant: 'info',
-  },
-}
-
-function resolveDatabaseMeta(type?: string) {
-  if (!type) return null
-  const normalized = type.toLowerCase()
-  return (
-    DATABASE_META[normalized] ?? {
-      label: type,
-      descriptionKey: 'Custom database driver detected.',
-      variant: 'info' as const,
-    }
-  )
 }
 
 export function DatabaseStep({ status }: DatabaseStepProps) {

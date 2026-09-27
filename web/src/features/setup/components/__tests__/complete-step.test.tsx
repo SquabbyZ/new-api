@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { render, screen } from '@testing-library/react'
+import i18next from 'i18next'
 import { expect, it } from 'vitest'
 
 import type { SetupFormValues, SetupStatus } from '../../types'
@@ -24,7 +25,7 @@ import { CompleteStep } from '../complete-step'
 
 // The suite's i18next instance is initialized with empty English resources, so
 // t('English key') renders that key verbatim. Queries below therefore assert on
-// translation keys, the same literals tracked by i18n:sync.
+// translation keys, the same literals tracked by static-keys.ts and i18n:sync.
 const VALUES: SetupFormValues = {
   username: 'admin',
   password: '',
@@ -32,6 +33,7 @@ const VALUES: SetupFormValues = {
   usageMode: 'self',
 }
 
+const DATABASE_LABEL = 'Database'
 const LOG_DATABASE_LABEL = 'Log database'
 const PRE_CHANGE_ROWS = ['Database', 'Administrator account', 'Usage mode']
 
@@ -48,6 +50,16 @@ function renderStep(status?: SetupStatus) {
   return render(<CompleteStep status={status} values={VALUES} />)
 }
 
+// Each database row shows its name twice - once as the row value and once as
+// the badge label - so reach the badge through its row's own label instead of
+// counting every occurrence in the step.
+function rowBadge(rowLabel: string) {
+  return screen
+    .getByText(rowLabel)
+    .closest('div')
+    ?.querySelector('[data-slot="status-badge"]')
+}
+
 // Before this change the step always rendered three rows split by two
 // separators, so an input that reports no usable log database must still match
 // this shape element for element.
@@ -59,20 +71,19 @@ function expectPreChangeRendering(container: HTMLElement) {
   expect(screen.queryByText(LOG_DATABASE_LABEL)).not.toBeInTheDocument()
 }
 
-it('shows the log database beside the primary database when the two differ', () => {
+it('shows the friendly labels for the primary and log database when the two differ', () => {
   renderStep(
     fixture({ database_type: 'postgres', log_database_type: 'clickhouse' })
   )
 
-  // The primary row is untouched: raw type text plus its badge.
-  expect(screen.getAllByText('postgres')).toHaveLength(2)
+  // The primary row names the database the way the Database check step does,
+  // as both its row value and its badge label.
+  expect(screen.getAllByText('PostgreSQL')).toHaveLength(2)
+  expect(screen.queryByText('postgres')).not.toBeInTheDocument()
+  expect(rowBadge(DATABASE_LABEL)).toHaveClass('text-success')
 
-  const logRow = screen.getByText(LOG_DATABASE_LABEL).closest('div')
-  expect(logRow).not.toBeNull()
-  expect(logRow?.querySelector('[data-slot="status-badge"]')).toHaveClass(
-    'text-info'
-  )
-  expect(screen.getAllByText('clickhouse')).toHaveLength(2)
+  expect(screen.getAllByText('ClickHouse')).toHaveLength(2)
+  expect(rowBadge(LOG_DATABASE_LABEL)).toHaveClass('text-info')
 
   expect(screen.getByText('admin')).toBeVisible()
   expect(screen.getByText('Personal use mode')).toBeVisible()
@@ -124,37 +135,91 @@ it.each(['', '  '])(
   }
 )
 
-it('keeps the raw type text and the info badge for a differently cased log database', () => {
+it('resolves a differently cased primary database type to its friendly label', () => {
+  renderStep(fixture({ database_type: 'POSTGRES' }))
+
+  expect(screen.getAllByText('PostgreSQL')).toHaveLength(2)
+  expect(screen.queryByText('POSTGRES')).not.toBeInTheDocument()
+})
+
+it('labels the primary database from the raw reported type, not a trimmed one', () => {
+  const { container } = renderStep(
+    fixture({ database_type: '  postgres  ', log_database_type: 'postgres' })
+  )
+
+  // The Database check step resolves this same raw string and reports a custom
+  // driver, so resolving the trimmed type here would give the two steps two
+  // different names for one database.
+  expect(screen.queryByText('PostgreSQL')).not.toBeInTheDocument()
+  expect(screen.getAllByText('postgres')).toHaveLength(2)
+  expect(rowBadge(DATABASE_LABEL)).toHaveClass('text-info')
+
+  expectPreChangeRendering(container)
+})
+
+it.each([
+  { name: 'primary', status: { database_type: 'duckdb' }, row: DATABASE_LABEL },
+  {
+    name: 'log',
+    status: { database_type: 'postgres', log_database_type: 'duckdb' },
+    row: LOG_DATABASE_LABEL,
+  },
+])(
+  'keeps the raw reported type and uses the info badge for an unknown $name database type',
+  ({ status, row }) => {
+    renderStep(fixture(status))
+
+    expect(screen.getAllByText('duckdb')).toHaveLength(2)
+    expect(rowBadge(row)).toHaveClass('text-info')
+  }
+)
+
+it('lowercases an unrecognized log database type the way the Database check step does', () => {
+  renderStep(
+    fixture({ database_type: 'postgres', log_database_type: 'DuckDB' })
+  )
+
+  // The Database check step resolves the trimmed, lowercased log type, so this
+  // step has to resolve the same value or the two steps disagree again.
+  expect(screen.getAllByText('duckdb')).toHaveLength(2)
+  expect(rowBadge(LOG_DATABASE_LABEL)).toHaveClass('text-info')
+})
+
+it('resolves a differently cased log database type to its friendly label', () => {
   renderStep(
     fixture({ database_type: 'postgres', log_database_type: 'ClickHouse' })
   )
 
   expect(screen.getAllByText('ClickHouse')).toHaveLength(2)
-  expect(
-    screen
-      .getByText(LOG_DATABASE_LABEL)
-      .closest('div')
-      ?.querySelector('[data-slot="status-badge"]')
-  ).toHaveClass('text-info')
+  expect(rowBadge(LOG_DATABASE_LABEL)).toHaveClass('text-info')
 })
 
-it('falls back to a neutral badge for an unknown log database type', () => {
-  renderStep(
-    fixture({ database_type: 'postgres', log_database_type: 'duckdb' })
-  )
-
-  expect(screen.getAllByText('duckdb')).toHaveLength(2)
-  expect(
-    screen
-      .getByText(LOG_DATABASE_LABEL)
-      .closest('div')
-      ?.querySelector('[data-slot="status-badge"]')
-  ).toHaveClass('text-muted-foreground')
-})
-
-it('keeps the primary row and hides the log row when the status is unavailable', () => {
+it('falls back to Unknown with the info badge when the status is unavailable', () => {
   const { container } = renderStep(undefined)
 
   expect(screen.getAllByText('Unknown')).toHaveLength(2)
+  expect(rowBadge(DATABASE_LABEL)).toHaveClass('text-info')
   expectPreChangeRendering(container)
+})
+
+it('falls back to Unknown when the reported primary database type is empty', () => {
+  const { container } = renderStep(fixture({ database_type: '' }))
+
+  expect(screen.getAllByText('Unknown')).toHaveLength(2)
+  expect(rowBadge(DATABASE_LABEL)).toHaveClass('text-info')
+  expectPreChangeRendering(container)
+})
+
+it('renders the Unknown fallback through i18n so a translated locale shows its own wording', async () => {
+  i18next.addResourceBundle('zh', 'translation', { Unknown: '未知' })
+  await i18next.changeLanguage('zh')
+
+  try {
+    renderStep(undefined)
+
+    expect(screen.getAllByText('未知')).toHaveLength(2)
+  } finally {
+    await i18next.changeLanguage('en')
+    i18next.removeResourceBundle('zh', 'translation')
+  }
 })

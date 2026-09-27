@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next'
 import { StatusBadge } from '@/components/status-badge'
 import { Separator } from '@/components/ui/separator'
 
+import { resolveDatabaseMeta } from '../lib/database-meta'
 import type { SetupFormValues, SetupStatus } from '../types'
 
 interface CompleteStepProps {
@@ -35,21 +36,15 @@ const USAGE_MODE_LABEL_KEYS: Record<SetupFormValues['usageMode'], string> = {
   demo: 'Demo site mode',
 }
 
-const DATABASE_VARIANT: Record<
-  string,
-  'info' | 'success' | 'warning' | 'neutral'
-> = {
-  sqlite: 'warning',
-  mysql: 'success',
-  postgres: 'success',
-  clickhouse: 'info',
-}
-
 export function CompleteStep({ status, values }: CompleteStepProps) {
   const { t } = useTranslation()
   const usageLabelKey = USAGE_MODE_LABEL_KEYS[values.usageMode]
-  const dbType = status?.database_type ?? 'Unknown'
-  const databaseVariant = DATABASE_VARIANT[dbType.toLowerCase()] ?? 'neutral'
+  // Resolve from the raw reported type, exactly as the Database check step
+  // does: resolving a trimmed type instead would render a padded type with two
+  // different names across the two steps.
+  const databaseMeta = resolveDatabaseMeta(status?.database_type)
+  const databaseLabel = databaseMeta?.label ?? t('Unknown')
+  const databaseVariant = databaseMeta?.variant ?? 'info'
   // The log database earns its own row only when it differs from the primary
   // one: an unset LOG_SQL_DSN makes both types identical, and the default
   // deployment must keep rendering exactly the rows above.
@@ -57,7 +52,7 @@ export function CompleteStep({ status, values }: CompleteStepProps) {
   const logDatabaseType = status?.log_database_type?.trim() ?? ''
   const logType = logDatabaseType.toLowerCase()
   const showLogDatabase = logType !== '' && logType !== mainType
-  const logDatabaseVariant = DATABASE_VARIANT[logType] ?? 'neutral'
+  const logDatabaseMeta = showLogDatabase ? resolveDatabaseMeta(logType) : null
 
   return (
     <div className='flex flex-col items-center gap-6 text-center'>
@@ -82,16 +77,16 @@ export function CompleteStep({ status, values }: CompleteStepProps) {
               {t('Database')}
             </dt>
             <dd className='flex flex-wrap items-center gap-2'>
-              <span className='text-sm font-semibold'>{dbType}</span>
+              <span className='text-sm font-semibold'>{databaseLabel}</span>
               <StatusBadge
-                label={dbType}
+                label={databaseLabel}
                 variant={databaseVariant}
                 copyable={false}
               />
             </dd>
           </div>
 
-          {showLogDatabase && (
+          {logDatabaseMeta && (
             <>
               <Separator />
 
@@ -101,11 +96,11 @@ export function CompleteStep({ status, values }: CompleteStepProps) {
                 </dt>
                 <dd className='flex flex-wrap items-center gap-2'>
                   <span className='text-sm font-semibold'>
-                    {logDatabaseType}
+                    {logDatabaseMeta.label}
                   </span>
                   <StatusBadge
-                    label={logDatabaseType}
-                    variant={logDatabaseVariant}
+                    label={logDatabaseMeta.label}
+                    variant={logDatabaseMeta.variant}
                     copyable={false}
                   />
                 </dd>

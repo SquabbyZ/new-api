@@ -130,3 +130,20 @@ it('falls back to the custom driver copy for an unknown log database type', () =
     screen.queryByText('ClickHouse log database detected')
   ).not.toBeInTheDocument()
 })
+
+// The friendly label is the whole point of this step's database block, and the
+// resolver is shared with the review step: assert the resolved label reaches
+// the DOM, so a regression that renders the raw reported type cannot pass
+// silently. Badge variants are covered by the resolver's own unit tests.
+it.each([
+  { name: 'sqlite', label: 'SQLite' },
+  { name: 'mysql', label: 'MySQL' },
+  { name: 'postgres', label: 'PostgreSQL' },
+  { name: 'clickhouse', label: 'ClickHouse' },
+  // An unrecognized driver keeps its raw reported type.
+  { name: 'duckdb', label: 'duckdb' },
+])('renders the $name database as the $label label', ({ name, label }) => {
+  render(<DatabaseStep status={fixture({ database_type: name })} />)
+
+  expect(screen.getAllByText(label)).toHaveLength(2)
+})
