@@ -433,7 +433,8 @@ type releasedAuditLog struct {
 func (releasedAuditLog) TableName() string { return "logs" }
 
 // External tests create a new database per case on a loopback-only disposable
-// instance. They never drop databases or tables supplied through an environment variable.
+// instance. They drop only the nanosecond-named database this function created,
+// never a database or table supplied through an environment variable.
 func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 	t.Helper()
 	if kind == "sqlite" {
@@ -489,6 +490,29 @@ func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 		connection, err := db.DB()
 		if err == nil {
 			_ = connection.Close()
+		}
+		// Only this function's own nanosecond-named database is dropped; the
+		// environment-variable database is never touched.
+		admin, err := gorm.Open(original, &gorm.Config{})
+		if err == nil {
+			defer func() {
+				if pool, err := admin.DB(); err == nil {
+					_ = pool.Close()
+				}
+			}()
+			// model.InitDB / InitLogDB abandon pools on this database, and PostgreSQL
+			// refuses DROP DATABASE while any session is attached. terminate is 8.4+
+			// and pg_stat_activity.pid is 9.2+, so this holds at our 9.6 floor.
+			if kind == "postgres" {
+				err = admin.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = ? AND pid <> pg_backend_pid()", name).Error
+			}
+			if err == nil {
+				// No IF EXISTS, matching CREATE DATABASE: a missing database is a real fault.
+				err = admin.Exec("DROP DATABASE " + name).Error
+			}
+		}
+		if err != nil {
+			t.Errorf("isolated database %s (%s) was not dropped: %v", name, kind, err)
 		}
 	})
 	return db, newDSN
