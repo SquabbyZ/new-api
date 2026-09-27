@@ -420,7 +420,82 @@ func migrateClickHouseLogDB() error {
 	if err := LOG_DB.Exec(clickHouseLogCreateTableSQL(ttlDays)).Error; err != nil {
 		return err
 	}
+	// CREATE TABLE IF NOT EXISTS cannot change a table that already exists, so
+	// the two shape changes below are applied to existing tables separately.
+	// Both are no-ops on a database the current DDL created.
+	if err := widenClickHouseLogQuotaColumn(); err != nil {
+		return err
+	}
+	if err := ensureClickHouseLogSkippingIndexes(); err != nil {
+		return err
+	}
 	return syncClickHouseLogTTL(ttlDays)
+}
+
+// widenClickHouseLogQuotaColumn upgrades an existing `logs.quota` from Int32 to
+// Int64. GORM's AutoMigrate is not used on the ClickHouse log database, and
+// ClickHouse applies the widening as an asynchronous mutation that rewrites
+// only the quota column of every part (measured on 24.8.14.39: 1M rows / 13 MiB
+// rewrote in under 2 s, the other columns are hard-linked, not copied), so the
+// statement is issued without waiting for it. `system.columns` reports the new
+// type as soon as the ALTER is accepted, which is what makes the next startup a
+// no-op. That same property is why a failed mutation is never retried: the type
+// already reads Int64, so this code will not re-issue the ALTER, and the table
+// stays half-rewritten until an operator does.
+func widenClickHouseLogQuotaColumn() error {
+	var columns []struct {
+		Type string `gorm:"column:type"`
+	}
+	if err := LOG_DB.Raw(
+		"SELECT type FROM system.columns WHERE database = currentDatabase() AND table = 'logs' AND name = 'quota'",
+	).Scan(&columns).Error; err != nil {
+		return err
+	}
+	if len(columns) == 0 || columns[0].Type == "Int64" {
+		return nil
+	}
+	return LOG_DB.Exec("ALTER TABLE logs MODIFY COLUMN quota Int64").Error
+}
+
+// ensureClickHouseLogSkippingIndexes adds the pruning indexes for the two
+// columns the log readers filter on. The `logs` sort key is (created_at,
+// request_id), and ClickHouse cannot add an existing column to a MergeTree
+// sorting key in place, so a skipping index is the only way to prune on these
+// columns without rebuilding the table. MATERIALIZE INDEX backfills the index
+// for parts written before it existed; without it the index would only cover
+// new inserts.
+//
+// The probe and the ALTER are separate statements, so they are not atomic: two
+// masters starting in the same window (the default deployment, where NODE_TYPE
+// unset means every node is a master) can both see an index missing and both
+// issue the ALTER. `ADD INDEX IF NOT EXISTS` makes the losing side a no-op
+// instead of a "index with this name already exists" error that would reach
+// main's FatalLog as a startup failure.
+func ensureClickHouseLogSkippingIndexes() error {
+	var indexes []struct {
+		Name string `gorm:"column:name"`
+	}
+	if err := LOG_DB.Raw(
+		"SELECT name FROM system.data_skipping_indices WHERE database = currentDatabase() AND table = 'logs'",
+	).Scan(&indexes).Error; err != nil {
+		return err
+	}
+	existing := make(map[string]bool, len(indexes))
+	for _, index := range indexes {
+		existing[index.Name] = true
+	}
+	for _, index := range clickHouseLogSkippingIndexes {
+		if existing[index.Name] {
+			continue
+		}
+		if err := LOG_DB.Exec(clickHouseLogAddIndexSQL(index)).Error; err != nil {
+			return err
+		}
+		if err := LOG_DB.Exec("ALTER TABLE logs MATERIALIZE INDEX " + index.Name).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func clickHouseLogTTLDays() int {
@@ -446,7 +521,49 @@ func clickHouseLogTTLClause(ttlDays int) string {
 	return "\nTTL " + expression
 }
 
+// clickHouseLogSkippingIndex is one pruning index on `logs`. The definition is
+// shared by the CREATE TABLE column list and by the ALTER that backfills an
+// existing table, so a fresh install and an upgraded table end up with the same
+// index; `bloom_filter` is used rather than `minmax` because the filtered
+// columns are not correlated with the (created_at, request_id) sort key, which
+// is what `minmax` needs to prune (see the perf audit for the measurements).
+type clickHouseLogSkippingIndex struct {
+	Name        string
+	Column      string
+	Type        string
+	Granularity int
+}
+
+var clickHouseLogSkippingIndexes = []clickHouseLogSkippingIndex{
+	{"idx_user_id", "user_id", "bloom_filter(0.01)", 1},
+	{"idx_type", "type", "bloom_filter(0.01)", 1},
+}
+
+func clickHouseLogSkippingIndexClause(index clickHouseLogSkippingIndex) string {
+	return "INDEX " + clickHouseLogSkippingIndexDefinition(index)
+}
+
+// clickHouseLogSkippingIndexDefinition is the part of an index declaration that
+// the CREATE TABLE column list and the ALTER below share, so a fresh install and
+// an upgraded table cannot end up with differently defined indexes.
+func clickHouseLogSkippingIndexDefinition(index clickHouseLogSkippingIndex) string {
+	return fmt.Sprintf("%s %s TYPE %s GRANULARITY %d", index.Name, index.Column, index.Type, index.Granularity)
+}
+
+// clickHouseLogAddIndexSQL renders the ALTER that adds one index to a table that
+// already exists. IF NOT EXISTS is what makes the ALTER safe to issue when the
+// index may have appeared since it was probed (see
+// ensureClickHouseLogSkippingIndexes); it is a no-op on 24.8 and creates exactly
+// one index even when several nodes issue it at once.
+func clickHouseLogAddIndexSQL(index clickHouseLogSkippingIndex) string {
+	return "ALTER TABLE logs ADD INDEX IF NOT EXISTS " + clickHouseLogSkippingIndexDefinition(index)
+}
+
 func clickHouseLogCreateTableSQL(ttlDays int) string {
+	indexes := make([]string, 0, len(clickHouseLogSkippingIndexes))
+	for _, index := range clickHouseLogSkippingIndexes {
+		indexes = append(indexes, "\t"+clickHouseLogSkippingIndexClause(index))
+	}
 	return fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS logs (
 	id Int64 DEFAULT 0,
@@ -457,7 +574,7 @@ CREATE TABLE IF NOT EXISTS logs (
 	username String DEFAULT '',
 	token_name String DEFAULT '',
 	model_name String DEFAULT '',
-	quota Int32 DEFAULT 0,
+	quota Int64 DEFAULT 0,
 	prompt_tokens Int32 DEFAULT 0,
 	completion_tokens Int32 DEFAULT 0,
 	use_time Int32 DEFAULT 0,
@@ -468,11 +585,12 @@ CREATE TABLE IF NOT EXISTS logs (
 	ip String DEFAULT '',
 	request_id String DEFAULT '',
 	upstream_request_id String DEFAULT '',
-	other String DEFAULT ''
+	other String DEFAULT '',
+%s
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(toDateTime(created_at))
-ORDER BY (created_at, request_id)%s`, clickHouseLogTTLClause(ttlDays))
+ORDER BY (created_at, request_id)%s`, strings.Join(indexes, ",\n"), clickHouseLogTTLClause(ttlDays))
 }
 
 func syncClickHouseLogTTL(ttlDays int) error {
