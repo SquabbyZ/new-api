@@ -779,12 +779,15 @@ func respondTaskError(c *gin.Context, taskErr *taskdto.TaskError) {
 
 // taskSubmissionAPIError adapts a task error for the shared relay error paths.
 // TaskError.Error is nil for many local rejections, so fall back to the message.
+// 类别标注在这里而不是在每个调用点：它是这些错误进入共享错误路径的唯一入口，
+// 只有 ErrorCode / StatusCode / 消息之外多带了一个日志归类标签。
 func taskSubmissionAPIError(taskErr *taskdto.TaskError) *types.NewAPIError {
 	err := taskErr.Error
 	if err == nil {
 		err = errors.New(taskErr.Message)
 	}
-	return types.NewOpenAIError(err, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode)
+	return types.NewOpenAIError(err, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode,
+		types.ErrOptionWithErrorLogCategory(operation_setting.ErrorLogCategoryTaskUpstream))
 }
 
 // decideTaskRetry is the single retry decision for task submissions. The

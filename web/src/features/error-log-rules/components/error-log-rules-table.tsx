@@ -24,15 +24,21 @@ import {
 } from '@/components/data-table'
 import { Badge } from '@/components/ui/badge'
 
+import { Switch } from '@/components/ui/switch'
+
 import { GATE_LABEL_KEYS, type ErrorLogEntry } from '../types'
 
 /**
- * 只读的日志映射表。条目全部来自后端下发的 `ErrorLogMap.entries`。
+ * 日志映射表。条目全部来自后端下发的 `ErrorLogMap.entries`。
  *
- * 这里刻意不渲染任何可提交控件：那些判定是代码里硬编码的，本版本不提供逐类切换，
- * 任何开关或勾选框都会让管理员误以为可以逐类调整。
+ * 只有 `categorySwitch` 非 null 的行渲染开关 —— 其余的行是结构上不可切换的
+ * （它们的失败根本没到达记录点），渲染一个灰掉的开关会被读成「以后能用」。
  */
-export function ErrorLogRulesTable(props: { entries: ErrorLogEntry[] }) {
+export function ErrorLogRulesTable(props: {
+  entries: ErrorLogEntry[]
+  pendingOptionKey?: string
+  onCategoryChange: (optionKey: string, enabled: boolean) => void
+}) {
   const { t } = useTranslation()
 
   const columns: StaticDataTableColumn<ErrorLogEntry>[] = [
@@ -42,13 +48,40 @@ export function ErrorLogRulesTable(props: { entries: ErrorLogEntry[] }) {
       cell: (entry) => (
         <div className='min-w-0 space-y-1'>
           <div className='font-medium'>{t(entry.titleKey)}</div>
-          {entry.recorded ? null : (
+          {entry.reasonKey ? (
             <p className='text-muted-foreground text-xs'>
               {t(entry.reasonKey)}
             </p>
-          )}
+          ) : null}
         </div>
       ),
+    },
+    {
+      id: 'categorySwitch',
+      header: t('Collect'),
+      cellClassName: 'align-top',
+      cell: (entry) => {
+        const categorySwitch = entry.categorySwitch
+        if (categorySwitch === null) return null
+
+        return (
+          <div className='flex min-w-0 flex-col items-start gap-1'>
+            <Switch
+              aria-label={t('Record error logs for this category')}
+              checked={categorySwitch.enabled}
+              disabled={props.pendingOptionKey === categorySwitch.optionKey}
+              onCheckedChange={(checked) => {
+                props.onCategoryChange(categorySwitch.optionKey, checked)
+              }}
+            />
+            <span className='text-muted-foreground text-xs'>
+              {categorySwitch.source === 'setting'
+                ? t('Saved by the administrator')
+                : t('Default')}
+            </span>
+          </div>
+        )
+      },
     },
     {
       id: 'recorded',

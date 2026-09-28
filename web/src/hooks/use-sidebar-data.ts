@@ -22,7 +22,6 @@ import {
   ClipboardList,
   CreditCard,
   FileText,
-  FileWarning,
   FlaskConical,
   Key,
   LayoutDashboard,
@@ -168,14 +167,6 @@ export function useSidebarData(): SidebarData {
             title: t('Task Plugins'),
             url: '/task-plugins',
             icon: PlugZap,
-            requiredRole: ROLE.SUPER_ADMIN,
-          },
-          {
-            // 故意不接入 URL_TO_CONFIG_MAP：无映射的 URL 默认可见，而加了映射却漏配
-            // DEFAULT_SIDEBAR_MODULES.admin 会让这个菜单项对所有人消失。
-            title: t('Error Log Rules'),
-            url: '/error-logs',
-            icon: FileWarning,
             requiredRole: ROLE.SUPER_ADMIN,
           },
           {

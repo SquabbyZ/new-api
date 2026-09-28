@@ -87,15 +87,22 @@ const (
 	ErrorCodePreConsumeTokenQuotaFailed ErrorCode = "pre_consume_token_quota_failed"
 )
 
+// ErrorLogCategory 标识一个错误在错误日志里归属哪一类采集开关。
+//
+// 这是一个不透明的标签：本 module 只负责携带它，不认识任何具体取值 ——
+// 类别名是使用方的业务分类，由使用方定义（本仓库是
+// setting/operation_setting 的 ErrorLogCategory* 常量）。
+type ErrorLogCategory string
+
 type NewAPIError struct {
-	Err            error
-	RelayError     any
-	skipRetry      bool
-	recordErrorLog *bool
-	errorType      ErrorType
-	errorCode      ErrorCode
-	StatusCode     int
-	Metadata       json.RawMessage
+	Err              error
+	RelayError       any
+	skipRetry        bool
+	errorLogCategory ErrorLogCategory
+	errorType        ErrorType
+	errorCode        ErrorCode
+	StatusCode       int
+	Metadata         json.RawMessage
 }
 
 // Unwrap enables errors.Is / errors.As to work with NewAPIError by exposing the underlying error.
@@ -384,9 +391,11 @@ func ErrOptionWithSkipRetry() NewAPIErrorOptions {
 	}
 }
 
-func ErrOptionWithNoRecordErrorLog() NewAPIErrorOptions {
+// ErrOptionWithErrorLogCategory 声明该错误在错误日志里属于哪个采集开关。
+// 未声明的错误在记录点使用使用方的默认类别。
+func ErrOptionWithErrorLogCategory(category ErrorLogCategory) NewAPIErrorOptions {
 	return func(e *NewAPIError) {
-		e.recordErrorLog = kitutil.GetPointer(false)
+		e.errorLogCategory = category
 	}
 }
 
@@ -405,13 +414,10 @@ func ErrOptionWithHideErrMsg(replaceStr string) NewAPIErrorOptions {
 	}
 }
 
-func IsRecordErrorLog(e *NewAPIError) bool {
+// GetErrorLogCategory 返回错误携带的类别标识；空字符串表示调用方没有声明类别。
+func GetErrorLogCategory(e *NewAPIError) ErrorLogCategory {
 	if e == nil {
-		return false
+		return ""
 	}
-	if e.recordErrorLog == nil {
-		// default to true if not set
-		return true
-	}
-	return *e.recordErrorLog
+	return e.errorLogCategory
 }

@@ -823,7 +823,7 @@ export const STATIC_I18N_KEYS = [
   // Error log rules: entry titles and reasons are produced by the backend
   // (setting/operation_setting/error_log_setting.go) and rendered through
   // t(entry.titleKey) / t(entry.reasonKey), so the scanner cannot see them.
-  'Upstream channel error (after a channel is selected)',
+  'Upstream channel error (after a channel is selected), including failures without a specific category',
   'Async task submission upstream error',
   'No available channel in the group',
   'Tiered billing preparation failure',
@@ -835,15 +835,16 @@ export const STATIC_I18N_KEYS = [
   'Responses WebSocket internal dispatch failure',
   'Other log types (consume / login / audit / top-up / task billing)',
   'This failure returns before the record point, so no error log is written.',
-  'Local validation errors are rejected on purpose and are not upstream failures.',
-  'Insufficient quota is a normal business outcome, not a fault.',
-  'Marked as not recorded because the caller already handles this failure.',
+  'Excluded by the call-site condition before the record point. Recording it would require local errors to go through the channel error handler, which also disables the upstream channel.',
+  'Insufficient quota is a normal business outcome, not a fault. Enabling it may flood the error log with routine failures.',
+  'This failure is returned to the WebSocket client by the dispatch runner and never enters the relay error path, so no switch can make it record.',
   'Written by its own log switch and unrelated to the error log switch.',
+  // Error log rules section-registry nav (dynamic titleKey)
+  'Error Log Rules',
   // Error log rules: gate labels, rendered through t(GATE_LABEL_KEYS[gate]).
   'Error log switch is on',
-  'The error is not marked as unrecordable',
+  'This category is enabled',
   'The failure returns before the record point',
-  'Hardcoded as not recorded',
   'Local validation error',
   'Handled by another log switch',
 ] as const

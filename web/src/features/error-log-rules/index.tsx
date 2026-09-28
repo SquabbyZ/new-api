@@ -18,10 +18,9 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
 
-import { SectionPageLayout } from '@/components/layout'
-import { Badge } from '@/components/ui/badge'
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
+import { Alert, AlertDescription } from '@/components/ui/alert'
 import { SettingsCard } from '@/features/system-settings/components/settings-card'
 import { SettingsSwitchField } from '@/features/system-settings/components/settings-form-layout'
 import { useSystemOptions } from '@/features/system-settings/hooks/use-system-options'
@@ -30,112 +29,115 @@ import { useUpdateOption } from '@/features/system-settings/hooks/use-update-opt
 import { ErrorLogRulesTable } from './components/error-log-rules-table'
 import { parseErrorLogMap } from './lib/parse-error-log-map'
 
-export function ErrorLogRules() {
+/**
+ * 「系统设置 → 运维 → Error Log Rules」这一个 section 的内容主体。
+ *
+ * 标题与外层布局由 `SettingsPage`（`system-settings/components/settings-page.tsx`）
+ * 按 section 注册表统一提供，这里只渲染内容 —— 与 `LogSettingsSection` 等既有 section
+ * 的分工一致，不再自带页面骨架。
+ */
+export function ErrorLogRulesSection() {
   const { t } = useTranslation()
   const optionsQuery = useSystemOptions()
   const updateOption = useUpdateOption()
 
   const errorLogMap = parseErrorLogMap(optionsQuery.data?.data)
 
-  const title = (
-    <span className='inline-flex min-w-0 items-center gap-2'>
-      <span className='truncate'>{t('Error Log Rules')}</span>
-      <Badge variant='outline' className='shrink-0'>
-        Root
-      </Badge>
-    </span>
-  )
-
   if (optionsQuery.isPending) {
-    return (
-      <SectionPageLayout>
-        <SectionPageLayout.Title>{title}</SectionPageLayout.Title>
-        <SectionPageLayout.Content>
-          <LoadingState />
-        </SectionPageLayout.Content>
-      </SectionPageLayout>
-    )
+    return <LoadingState />
   }
 
   // 后端没有下发 ErrorLogMap（旧后端）或内容不合法时不渲染开关 ——
   // 展示一个可能不真实的生效值比展示错误更难排查。
   if (optionsQuery.isError || errorLogMap === null) {
     return (
-      <SectionPageLayout>
-        <SectionPageLayout.Title>{title}</SectionPageLayout.Title>
-        <SectionPageLayout.Content>
-          <ErrorState
-            title={t('Failed to load the error log rules')}
-            description={t(
-              'The backend did not return the error log map. Update the backend and try again.'
-            )}
-            onRetry={() => {
-              void optionsQuery.refetch()
-            }}
-          />
-        </SectionPageLayout.Content>
-      </SectionPageLayout>
+      <ErrorState
+        title={t('Failed to load the error log rules')}
+        description={t(
+          'The backend did not return the error log map. Update the backend and try again.'
+        )}
+        onRetry={() => {
+          void optionsQuery.refetch()
+        }}
+      />
     )
   }
 
   return (
-    <SectionPageLayout>
-      <SectionPageLayout.Title>{title}</SectionPageLayout.Title>
-      <SectionPageLayout.Content>
-        <div className='space-y-4'>
-          <SettingsCard
-            title={t('Error log switch')}
-            description={t(
-              'When enabled, failures that reach the record point are written to the error log.'
-            )}
-          >
-            <SettingsSwitchField
-              controlId='error-log-enabled'
-              checked={errorLogMap.enabled}
-              disabled={updateOption.isPending}
-              onCheckedChange={(checked) => {
-                updateOption.mutate({
-                  key: 'error_log_setting.enabled',
-                  value: checked,
+    <div className='space-y-4'>
+      <SettingsCard
+        title={t('Error log switch')}
+        description={t(
+          'When enabled, failures that reach the record point are written to the error log.'
+        )}
+      >
+        <SettingsSwitchField
+          controlId='error-log-enabled'
+          checked={errorLogMap.enabled}
+          disabled={updateOption.isPending}
+          onCheckedChange={(checked) => {
+            updateOption.mutate({
+              key: 'error_log_setting.enabled',
+              value: checked,
+            })
+          }}
+          label={t('Record error logs')}
+          description={
+            errorLogMap.enabledSource === 'setting'
+              ? t('Currently decided by the administrator setting.')
+              : t('Currently following the {{envVar}} environment variable.', {
+                  envVar: errorLogMap.envVar,
                 })
-              }}
-              label={t('Record error logs')}
-              description={
-                errorLogMap.enabledSource === 'setting'
-                  ? t('Currently decided by the administrator setting.')
-                  : t(
-                      'Currently following the {{envVar}} environment variable.',
-                      { envVar: errorLogMap.envVar }
-                    )
-              }
-            />
-          </SettingsCard>
+          }
+        />
+      </SettingsCard>
 
-          <SettingsCard
-            title={t('Which failures leave an error log')}
-            description={t(
-              'These decisions are hardcoded in the code and cannot be toggled in this version.'
+      <SettingsCard
+        title={t('Which failures leave an error log')}
+        description={t(
+          'Five categories can be toggled individually below. The other six cannot, and each row says why.'
+        )}
+      >
+        {errorLogMap.enabled ? null : (
+          <Alert>
+            <AlertDescription>
+              {t(
+                'The error log switch is off, so nothing is written no matter how the category switches below are set. Your category settings are kept.'
+              )}
+            </AlertDescription>
+          </Alert>
+        )}
+        <ErrorLogRulesTable
+          entries={errorLogMap.entries}
+          pendingOptionKey={
+            updateOption.isPending ? updateOption.variables?.key : undefined
+          }
+          onCategoryChange={(optionKey, enabled) => {
+            // 与总开关同一条写入路径：键由后端下发，值传布尔。
+            updateOption.mutate({ key: optionKey, value: enabled })
+          }}
+        />
+      </SettingsCard>
+
+      <SettingsCard title={t('Why some failures are not recorded')}>
+        <div className='text-muted-foreground space-y-3 text-sm'>
+          <p>
+            {t(
+              'Insufficient quota, insufficient subscription quota and pre-consume failures are normal business outcomes, not faults, so they are collected off by default. Turning one on is an informed choice: it may flood the error log with routine failures.'
             )}
-          >
-            <ErrorLogRulesTable entries={errorLogMap.entries} />
-          </SettingsCard>
-
-          <SettingsCard title={t('Why some failures are not recorded')}>
-            <div className='text-muted-foreground space-y-3 text-sm'>
-              <p>
-                {t(
-                  'Insufficient quota, insufficient subscription quota and pre-consume failures are normal business outcomes, not faults. Recording them would mix "the user ran out of quota" with "the system is broken" and drown the error log.'
-                )}
-              </p>
-              <p>
-                {t(
-                  'Some failures happen before the record point is reached — for example when no channel is available in the group, when tiered billing preparation fails, or when the request body cannot be read. Those paths never call the error log writer.'
-                )}
-              </p>
-            </div>
-          </SettingsCard>
+          </p>
+          <p>
+            {t(
+              'Some failures return before the record point is reached — when no channel is available in the group, when tiered billing preparation fails, or when the request body cannot be read. No switch can make them record; doing so would mean moving where recording happens, which is a separate change. The same applies to local task validation errors, and recording those would also disable the upstream channel.'
+            )}
+          </p>
+          <p>
+            {t(
+              'Failures that carry no specific category are counted as "Upstream channel error (after a channel is selected)". Turning that category off therefore also stops the records for relay retries and channel tests.'
+            )}
+          </p>
         </div>
-      </SectionPageLayout.Content>
-    </SectionPageLayout>
+      </SettingsCard>
+    </div>
   )
 }

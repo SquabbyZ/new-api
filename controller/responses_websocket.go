@@ -104,11 +104,14 @@ func newResponsesWSRequestRunner(c *gin.Context) relay.ResponsesWSRequestRunner 
 		var body struct {
 			Error *types.OpenAIError `json:"error"`
 		}
+		// 这里构造的错误只会被 relay 的 WS 派发 runner 用来写回一条错误帧
+		// （relay/responses_websocket.go 的 buildResponsesWSErrorPayload），从不经过
+		// service.ProcessChannelError，因此不带错误日志归类 —— 那标签在记录点上永远不会被读到。
 		if common.Unmarshal(response.body.Bytes(), &body) == nil && body.Error != nil {
-			return types.WithOpenAIError(*body.Error, response.status, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+			return types.WithOpenAIError(*body.Error, response.status, types.ErrOptionWithSkipRetry())
 		}
 		// The existing in-memory rate limiter returns a bare 429 response.
-		return types.NewErrorWithStatusCode(errors.New(http.StatusText(response.status)), types.ErrorCodeInvalidRequest, response.status, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
+		return types.NewErrorWithStatusCode(errors.New(http.StatusText(response.status)), types.ErrorCodeInvalidRequest, response.status, types.ErrOptionWithSkipRetry())
 	}
 }
 

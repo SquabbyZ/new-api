@@ -73,8 +73,16 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		})
 	}
 
-	// 运行时读取，不读启动时的 env 快照：管理员在界面上改开关后，后续请求立即生效。
-	if operation_setting.IsErrorLogEnabled() && types.IsRecordErrorLog(err) {
+	// 两层闸，都是运行时读取，不读启动时的 env 快照：管理员在界面上改开关后，
+	// 后续请求立即生效。全局是外层硬闸，类别开关是内层闸。
+	//
+	// 没有声明类别的错误归入 relay_upstream_error：能走到这里本身就意味着
+	// 「已选中渠道之后失败」，这正是该类的定义。
+	category := types.GetErrorLogCategory(err)
+	if category == "" {
+		category = operation_setting.ErrorLogCategoryUpstream
+	}
+	if operation_setting.IsErrorLogEnabled() && operation_setting.IsErrorLogCategoryEnabled(string(category)) {
 		userId := c.GetInt("id")
 		tokenName := c.GetString("token_name")
 		modelName := c.GetString("original_model")

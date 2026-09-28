@@ -16,21 +16,47 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ErrorLogEntry, ErrorLogGate, ErrorLogMap } from '../types'
+import type {
+  ErrorLogCategorySwitch,
+  ErrorLogEntry,
+  ErrorLogGate,
+  ErrorLogMap,
+} from '../types'
 
 const ERROR_LOG_MAP_OPTION_KEY = 'ErrorLogMap'
 
 const ERROR_LOG_GATES = new Set<string>([
   'global_switch',
-  'per_error_flag',
+  'category_switch',
   'before_record_point',
-  'hardcoded_no_record',
   'local_error',
   'other_switch',
 ])
 
 function isGate(value: string): value is ErrorLogGate {
   return ERROR_LOG_GATES.has(value)
+}
+
+/**
+ * 解析一个类别的采集开关。
+ *
+ * 缺失 `category_switch`（旧后端）⇒ 视为 null，页面不渲染开关，其余照旧。
+ * `optionKey` 由后端下发，前端不按命名约定拼接 —— 那是第二份可漂移的清单。
+ */
+function toCategorySwitch(raw: unknown): ErrorLogCategorySwitch | null {
+  if (typeof raw !== 'object' || raw === null) return null
+
+  const value = raw as Record<string, unknown>
+  if (typeof value.category !== 'string' || typeof value.option_key !== 'string') {
+    return null
+  }
+
+  return {
+    category: value.category,
+    optionKey: value.option_key,
+    enabled: value.enabled === true,
+    source: value.source === 'setting' ? 'setting' : 'default',
+  }
 }
 
 function toEntry(raw: unknown): ErrorLogEntry | null {
@@ -52,6 +78,7 @@ function toEntry(raw: unknown): ErrorLogEntry | null {
       : [],
     reasonKey: typeof entry.reasonKey === 'string' ? entry.reasonKey : '',
     source: typeof entry.source === 'string' ? entry.source : '',
+    categorySwitch: toCategorySwitch(entry.category_switch),
   }
 }
 

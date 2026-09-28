@@ -12,9 +12,12 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 
 	"github.com/gin-gonic/gin"
@@ -212,19 +215,21 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 	assert.NotContains(t, other.Snapshot()["admin_info"], "request_policy", "requests without decisions do not carry an empty record")
 }
 
-// TestProcessChannelErrorFollowsTheRuntimeErrorLogSwitch 是本 slice 的核心回归。
-// 记录决策必须读运行时设置，而不是启动时的 env 快照：如果读取点退回
-// constant.ErrorLogEnabled，开关打开后的那条断言就会失败 —— 界面上改了开关却不生效、
-// 必须重启，正是要防的那个 bug。
-func TestProcessChannelErrorFollowsTheRuntimeErrorLogSwitch(t *testing.T) {
-	gin.SetMode(gin.TestMode)
+// errorLogTestFixture 装配记录点所需的最小环境：内存 SQLite 同时充当主库与日志库、
+// 一个已初始化的 OptionMap、以及「未设 env、未保存过设置」的全新部署默认态。
+//
+// 返回的 errorLogRows 数当前的 type=5 行数。用例结束会把 optionKeys 里的键还原成
+// "null" —— 这一步必须在 model.DB 仍指向测试库、且测试库仍打开时执行，
+// 否则这条写入会落到真实数据库上。
+func errorLogTestFixture(t *testing.T, optionKeys ...string) func() int64 {
+	t.Helper()
 
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	sqlDB, err := database.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&model.Option{}, &model.Log{}))
+	require.NoError(t, database.AutoMigrate(&model.Option{}, &model.Log{}, &model.User{}))
 
 	previousDB, previousLogDB := model.DB, model.LOG_DB
 	previousRedis := common.RedisEnabled
@@ -240,17 +245,16 @@ func TestProcessChannelErrorFollowsTheRuntimeErrorLogSwitch(t *testing.T) {
 		common.OptionMap = make(map[string]string)
 	}
 	common.OptionMapRWMutex.Unlock()
-	// 未设 env、未保存过设置 —— 全新部署的默认态。
+	// 未设 env、未保存过设置。
 	constant.ErrorLogEnabled = false
 
 	t.Cleanup(func() {
-		// 先把开关还原成「没设过」。这一步必须在 model.DB 仍指向测试库、且测试库仍打开时执行，
-		// 否则这条写入会落到真实数据库上。
-		assert.NoError(t, model.UpdateOption("error_log_setting.enabled", "null"))
-		common.OptionMapRWMutex.Lock()
-		delete(common.OptionMap, "error_log_setting.enabled")
-		common.OptionMapRWMutex.Unlock()
-
+		for _, key := range optionKeys {
+			assert.NoError(t, model.UpdateOption(key, "null"))
+			common.OptionMapRWMutex.Lock()
+			delete(common.OptionMap, key)
+			common.OptionMapRWMutex.Unlock()
+		}
 		require.NoError(t, sqlDB.Close())
 		model.DB, model.LOG_DB = previousDB, previousLogDB
 		common.RedisEnabled = previousRedis
@@ -258,44 +262,243 @@ func TestProcessChannelErrorFollowsTheRuntimeErrorLogSwitch(t *testing.T) {
 		constant.ErrorLogEnabled = previousFallback
 	})
 
-	newErrorLogContext := func() *gin.Context {
-		c, _ := gin.CreateTestContext(httptest.NewRecorder())
-		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-		c.Set("id", 7)
-		c.Set("token_name", "runtime-switch")
-		c.Set("token_id", 11)
-		c.Set("original_model", "gpt-test")
-		c.Set("group", "default")
-		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		return c
-	}
-	upstreamError := func() *types.NewAPIError {
-		return types.NewOpenAIError(errors.New("upstream refused"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
-	}
-	channelError := types.ChannelError{ChannelId: 101, ChannelName: "runtime-switch", AutoBan: false}
-	errorLogRows := func() int64 {
+	return func() int64 {
 		var count int64
 		require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("type = ?", model.LogTypeError).Count(&count).Error)
 		return count
 	}
+}
 
-	ProcessChannelError(newErrorLogContext(), channelError, upstreamError(), nil)
+func newErrorLogTestContext() *gin.Context {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	c.Set("id", 7)
+	c.Set("token_name", "runtime-switch")
+	c.Set("token_id", 11)
+	c.Set("original_model", "gpt-test")
+	c.Set("group", "default")
+	common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+	return c
+}
+
+// TestProcessChannelErrorFollowsTheRuntimeErrorLogSwitch 是本 slice 的核心回归。
+// 记录决策必须读运行时设置，而不是启动时的 env 快照：如果读取点退回
+// constant.ErrorLogEnabled，开关打开后的那条断言就会失败 —— 界面上改了开关却不生效、
+// 必须重启，正是要防的那个 bug。
+func TestProcessChannelErrorFollowsTheRuntimeErrorLogSwitch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	errorLogRows := errorLogTestFixture(t, "error_log_setting.enabled")
+
+	upstreamError := func() *types.NewAPIError {
+		return types.NewOpenAIError(errors.New("upstream refused"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
+	}
+	channelError := types.ChannelError{ChannelId: 101, ChannelName: "runtime-switch", AutoBan: false}
+
+	ProcessChannelError(newErrorLogTestContext(), channelError, upstreamError(), nil)
 	assert.Zero(t, errorLogRows(), "the default stays off, so no error log row is written")
 
 	// 与 PUT /api/option/ 完全同一条写入路径。
 	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "true"))
-	ProcessChannelError(newErrorLogContext(), channelError, upstreamError(), nil)
+	ProcessChannelError(newErrorLogTestContext(), channelError, upstreamError(), nil)
 	assert.Equal(t, int64(1), errorLogRows(),
 		"turning the switch on must take effect for the next request without a restart")
 
 	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "false"))
-	ProcessChannelError(newErrorLogContext(), channelError, upstreamError(), nil)
+	ProcessChannelError(newErrorLogTestContext(), channelError, upstreamError(), nil)
 	assert.Equal(t, int64(1), errorLogRows(), "turning the switch off stops new error log rows")
 
 	// 回到「没设过」后重新跟随 ERROR_LOG_ENABLED：只设了 env=true 的部署升级后不能静默变关。
 	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "null"))
 	constant.ErrorLogEnabled = true
-	ProcessChannelError(newErrorLogContext(), channelError, upstreamError(), nil)
+	ProcessChannelError(newErrorLogTestContext(), channelError, upstreamError(), nil)
 	assert.Equal(t, int64(2), errorLogRows(),
 		"a deployment that only sets ERROR_LOG_ENABLED=true keeps recording after the upgrade")
+}
+
+// errorLogCategories 是可切换类别与它们的历史默认值。defaultOn 逐条对应
+// PRD 选定 2 的表：默认值必须等于引入逐类开关之前的记录行为。
+//
+// 这里没有 responses_ws_dispatch_error：它的站点把错误直接还给 WS 派发 runner，
+// 从不进入 ProcessChannelError，因此没有可发布的开关（见 operation_setting 的条目注释）。
+func errorLogCategories() []struct {
+	ID        string
+	Key       string
+	DefaultOn bool
+	Err       func() *types.NewAPIError
+} {
+	openAI := func(ops ...types.NewAPIErrorOptions) func() *types.NewAPIError {
+		return func() *types.NewAPIError {
+			return types.NewOpenAIError(errors.New("upstream refused"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway, ops...)
+		}
+	}
+	quota := func(category string, message string, ops ...types.NewAPIErrorOptions) func() *types.NewAPIError {
+		return func() *types.NewAPIError {
+			return types.NewErrorWithStatusCode(errors.New(message), types.ErrorCodeInsufficientUserQuota, http.StatusForbidden,
+				append(ops, types.ErrOptionWithErrorLogCategory(types.ErrorLogCategory(category)))...)
+		}
+	}
+	return []struct {
+		ID        string
+		Key       string
+		DefaultOn bool
+		Err       func() *types.NewAPIError
+	}{
+		{
+			ID:        operation_setting.ErrorLogCategoryUpstream,
+			Key:       "error_log_setting.record_relay_upstream_error",
+			DefaultOn: true,
+			// 没有声明类别的错误 —— 缺省归类为第 1 行的那条规则。
+			Err: openAI(),
+		},
+		{
+			ID:        operation_setting.ErrorLogCategoryTaskUpstream,
+			Key:       "error_log_setting.record_task_upstream_error",
+			DefaultOn: true,
+			Err:       openAI(types.ErrOptionWithErrorLogCategory(operation_setting.ErrorLogCategoryTaskUpstream)),
+		},
+		{
+			ID:        operation_setting.ErrorLogCategoryInsufficientWalletQuota,
+			Key:       "error_log_setting.record_insufficient_wallet_quota",
+			DefaultOn: false,
+			Err:       quota(operation_setting.ErrorLogCategoryInsufficientWalletQuota, "用户额度不足, 剩余额度: 0"),
+		},
+		{
+			ID:        operation_setting.ErrorLogCategoryInsufficientSubscriptionQuota,
+			Key:       "error_log_setting.record_insufficient_subscription_quota",
+			DefaultOn: false,
+			Err:       quota(operation_setting.ErrorLogCategoryInsufficientSubscriptionQuota, "订阅额度不足或未配置订阅: no active subscription"),
+		},
+		{
+			ID:        operation_setting.ErrorLogCategoryTokenPreconsumeFailed,
+			Key:       "error_log_setting.record_token_preconsume_failed",
+			DefaultOn: false,
+			Err: func() *types.NewAPIError {
+				return types.NewErrorWithStatusCode(errors.New("token quota exhausted"), types.ErrorCodePreConsumeTokenQuotaFailed, http.StatusForbidden,
+					types.ErrOptionWithSkipRetry(), types.ErrOptionWithErrorLogCategory(operation_setting.ErrorLogCategoryTokenPreconsumeFailed))
+			},
+		},
+	}
+}
+
+// TestErrorLogCategorySwitchesAreIndependentAndKeepTheirDefaults 覆盖全部可切换类别：
+// 默认值逐类等于改动前的行为、每类可以单独开/关、且开关之间不串扰。
+func TestErrorLogCategorySwitchesAreIndependentAndKeepTheirDefaults(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	categories := errorLogCategories()
+	keys := make([]string, 0, len(categories))
+	for _, category := range categories {
+		keys = append(keys, category.Key)
+	}
+	errorLogRows := errorLogTestFixture(t, append(keys, "error_log_setting.enabled")...)
+
+	// 升级后的真实起点：6 个键都没被写过，option 表里也不该有它们。
+	// 这一条要在夹具装好之后查，否则查的是真实库。
+	for _, category := range categories {
+		var stored int64
+		require.NoError(t, model.DB.Model(&model.Option{}).Where("key = ?", category.Key).Count(&stored).Error)
+		assert.Zero(t, stored, "升级不得写回任何一个逐类开关")
+	}
+
+	channelError := types.ChannelError{ChannelId: 101, ChannelName: "category-switch", AutoBan: false}
+	record := func(err *types.NewAPIError) {
+		ProcessChannelError(newErrorLogTestContext(), channelError, err, nil)
+	}
+
+	// 判定层：全部为「没设过」时，逐类等于历史默认值。
+	for _, category := range categories {
+		assert.Equal(t, category.DefaultOn, operation_setting.IsErrorLogCategoryEnabled(category.ID),
+			"%s must keep its pre-slice default while the switch was never saved", category.ID)
+	}
+	// 未知类别 fail-open：将来新增的标签不会因为配置里没有字段而静默丢日志。
+	assert.True(t, operation_setting.IsErrorLogCategoryEnabled("future_category"))
+
+	// 「已有老配置」起点：库里只显式保存过总开关，没有这 6 个键。
+	// 反序列化必须把它们留成 nil 而不是 false —— 否则默认开的 2 类会在升级瞬间静默变关。
+	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "true"))
+	for _, category := range categories {
+		var stored int64
+		require.NoError(t, model.DB.Model(&model.Option{}).Where("key = ?", category.Key).Count(&stored).Error)
+		assert.Zero(t, stored, "%s must stay absent in an upgraded database", category.Key)
+		assert.Equal(t, category.DefaultOn, operation_setting.IsErrorLogCategoryEnabled(category.ID),
+			"%s must keep its pre-slice behavior when only the global switch was ever saved", category.ID)
+	}
+	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "null"))
+
+	// 全局关时任何类别都不记录 —— 逐类开关不能绕过外层硬闸。
+	for _, category := range categories {
+		require.NoError(t, model.UpdateOption(category.Key, "true"))
+	}
+	record(categories[0].Err())
+	assert.Zero(t, errorLogRows(), "the global switch is the outer hard gate")
+	// 六类全部回到「没设过」，让下面的逐类循环从各自的真实默认态出发。
+	for _, category := range categories {
+		require.NoError(t, model.UpdateOption(category.Key, "null"))
+	}
+	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "true"))
+
+	// 行为层：逐类开 → 记录；关 → 不记录；同时证明另外 5 类不受影响。
+	for i, category := range categories {
+		require.NoError(t, model.UpdateOption(category.Key, "false"))
+		before := errorLogRows()
+		record(category.Err())
+		assert.Equal(t, before, errorLogRows(), "%s is off, so it writes no row", category.ID)
+		// 串扰断言：关掉 X 之后，另外 5 类的判定结果必须仍然等于它们各自的历史默认值。
+		for j, other := range categories {
+			if i == j {
+				assert.False(t, operation_setting.IsErrorLogCategoryEnabled(other.ID))
+				continue
+			}
+			assert.Equal(t, other.DefaultOn, operation_setting.IsErrorLogCategoryEnabled(other.ID),
+				"%s must not be affected by %s", other.ID, category.ID)
+		}
+
+		require.NoError(t, model.UpdateOption(category.Key, "true"))
+		before = errorLogRows()
+		record(category.Err())
+		assert.Equal(t, before+1, errorLogRows(), "%s is on, so it writes exactly one row", category.ID)
+
+		// 串扰断言（行为层）：X 开着的时候，另外 5 类的记录行为仍由它们自己的设置决定。
+		require.NoError(t, model.UpdateOption(category.Key, "false"))
+		for j, other := range categories {
+			if i == j {
+				continue
+			}
+			before = errorLogRows()
+			record(other.Err())
+			if other.DefaultOn {
+				assert.Equal(t, before+1, errorLogRows(), "%s stays on while %s is off", other.ID, category.ID)
+			} else {
+				assert.Equal(t, before, errorLogRows(), "%s stays off while %s is off", other.ID, category.ID)
+			}
+		}
+		// 回到「没设过」，让下一轮从这个类别的真实默认态开始。
+		require.NoError(t, model.UpdateOption(category.Key, "null"))
+	}
+}
+
+// TestBillingSessionKeepsItsErrorFieldsAndCarriesTheLogCategory 锁住计费门禁的硬约束：
+// 那 10 处调用点只换了「日志归类」这一个 option，错误码 / 状态码 / 消息文本一字未变。
+func TestBillingSessionKeepsItsErrorFieldsAndCarriesTheLogCategory(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	errorLogTestFixture(t)
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	// wallet_only 直接走 tryWallet，用户没有额度时就是 `:396` 那个调用点。
+	relayInfo := &relaycommon.RelayInfo{UserId: 999999, UserSetting: kitdto.UserSetting{BillingPreference: "wallet_only"}}
+	_, apiErr := NewBillingSession(c, relayInfo, 100)
+
+	require.NotNil(t, apiErr)
+	assert.Equal(t, types.ErrorCodeInsufficientUserQuota, apiErr.GetErrorCode())
+	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+	wantMessage := "用户额度不足, 剩余额度: " + logger.FormatQuota(0)
+	assert.Equal(t, wantMessage, apiErr.Error())
+	assert.Equal(t, types.ErrorLogCategory(operation_setting.ErrorLogCategoryInsufficientWalletQuota), types.GetErrorLogCategory(apiErr))
+	// 归类标签不参与错误文本与对外的 OpenAI 错误体：对外表现与改动前一致。
+	assert.NotContains(t, apiErr.Error(), operation_setting.ErrorLogCategoryInsufficientWalletQuota)
+	assert.Equal(t, types.OpenAIError{
+		Message: wantMessage,
+		Type:    string(types.ErrorTypeNewAPIError),
+		Code:    types.ErrorCodeInsufficientUserQuota,
+	}, apiErr.ToOpenAIError())
 }
