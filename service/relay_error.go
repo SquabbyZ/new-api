@@ -73,7 +73,8 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 		})
 	}
 
-	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
+	// 运行时读取，不读启动时的 env 快照：管理员在界面上改开关后，后续请求立即生效。
+	if operation_setting.IsErrorLogEnabled() && types.IsRecordErrorLog(err) {
 		userId := c.GetInt("id")
 		tokenName := c.GetString("token_name")
 		modelName := c.GetString("original_model")

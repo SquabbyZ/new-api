@@ -124,6 +124,16 @@ func GetOptions(c *gin.Context) {
 		Key:   "CompletionRatioMeta",
 		Value: buildCompletionRatioMetaValue(optionValues),
 	})
+	// 错误日志映射表：条目与当前生效值都只由后端产出，前端不做第二份清单。
+	errorLogMap, err := common.Marshal(operation_setting.BuildErrorLogMapPayload())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	options = append(options, &model.Option{
+		Key:   "ErrorLogMap",
+		Value: string(errorLogMap),
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

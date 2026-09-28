@@ -211,3 +211,91 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 	AppendRelayLogAdminInfo(untouched, nil, other)
 	assert.NotContains(t, other.Snapshot()["admin_info"], "request_policy", "requests without decisions do not carry an empty record")
 }
+
+// TestProcessChannelErrorFollowsTheRuntimeErrorLogSwitch 是本 slice 的核心回归。
+// 记录决策必须读运行时设置，而不是启动时的 env 快照：如果读取点退回
+// constant.ErrorLogEnabled，开关打开后的那条断言就会失败 —— 界面上改了开关却不生效、
+// 必须重启，正是要防的那个 bug。
+func TestProcessChannelErrorFollowsTheRuntimeErrorLogSwitch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, database.AutoMigrate(&model.Option{}, &model.Log{}))
+
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousRedis := common.RedisEnabled
+	previousMainType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	previousFallback := constant.ErrorLogEnabled
+
+	model.DB, model.LOG_DB = database, database
+	common.RedisEnabled = false
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	// updateOptionMap 写入全局 OptionMap，测试进程里它默认是 nil。
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	common.OptionMapRWMutex.Unlock()
+	// 未设 env、未保存过设置 —— 全新部署的默认态。
+	constant.ErrorLogEnabled = false
+
+	t.Cleanup(func() {
+		// 先把开关还原成「没设过」。这一步必须在 model.DB 仍指向测试库、且测试库仍打开时执行，
+		// 否则这条写入会落到真实数据库上。
+		assert.NoError(t, model.UpdateOption("error_log_setting.enabled", "null"))
+		common.OptionMapRWMutex.Lock()
+		delete(common.OptionMap, "error_log_setting.enabled")
+		common.OptionMapRWMutex.Unlock()
+
+		require.NoError(t, sqlDB.Close())
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.RedisEnabled = previousRedis
+		common.SetDatabaseTypes(previousMainType, previousLogType)
+		constant.ErrorLogEnabled = previousFallback
+	})
+
+	newErrorLogContext := func() *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		c.Set("id", 7)
+		c.Set("token_name", "runtime-switch")
+		c.Set("token_id", 11)
+		c.Set("original_model", "gpt-test")
+		c.Set("group", "default")
+		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+		return c
+	}
+	upstreamError := func() *types.NewAPIError {
+		return types.NewOpenAIError(errors.New("upstream refused"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
+	}
+	channelError := types.ChannelError{ChannelId: 101, ChannelName: "runtime-switch", AutoBan: false}
+	errorLogRows := func() int64 {
+		var count int64
+		require.NoError(t, model.LOG_DB.Model(&model.Log{}).Where("type = ?", model.LogTypeError).Count(&count).Error)
+		return count
+	}
+
+	ProcessChannelError(newErrorLogContext(), channelError, upstreamError(), nil)
+	assert.Zero(t, errorLogRows(), "the default stays off, so no error log row is written")
+
+	// 与 PUT /api/option/ 完全同一条写入路径。
+	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "true"))
+	ProcessChannelError(newErrorLogContext(), channelError, upstreamError(), nil)
+	assert.Equal(t, int64(1), errorLogRows(),
+		"turning the switch on must take effect for the next request without a restart")
+
+	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "false"))
+	ProcessChannelError(newErrorLogContext(), channelError, upstreamError(), nil)
+	assert.Equal(t, int64(1), errorLogRows(), "turning the switch off stops new error log rows")
+
+	// 回到「没设过」后重新跟随 ERROR_LOG_ENABLED：只设了 env=true 的部署升级后不能静默变关。
+	require.NoError(t, model.UpdateOption("error_log_setting.enabled", "null"))
+	constant.ErrorLogEnabled = true
+	ProcessChannelError(newErrorLogContext(), channelError, upstreamError(), nil)
+	assert.Equal(t, int64(2), errorLogRows(),
+		"a deployment that only sets ERROR_LOG_ENABLED=true keeps recording after the upgrade")
+}
