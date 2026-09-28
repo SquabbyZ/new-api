@@ -323,9 +323,13 @@ describe('AbuseAlertsSection', () => {
 
   test('renders the findings and the skipped entries once the scan returns', async () => {
     useProductionShape()
+    // hours / windowMinutes 刻意取**非默认**值（系统默认是 24 / 10，见
+    // abuse_alert_setting.go 的 window_minutes 默认值与端点 hours 上限）。
+    // 取默认值会让下面那条渲染断言无法区分「按后端报告渲染」与「把 24/10
+    // 写死在组件里」—— 后者正是它要挡的东西。
     mocks.getAbuseAlerts.mockResolvedValue({
-      hours: 24,
-      windowMinutes: 10,
+      hours: 7,
+      windowMinutes: 3,
       generatedAt: 1790000000,
       baselineReady: true,
       baselineReadyAt: 0,
@@ -367,12 +371,59 @@ describe('AbuseAlertsSection', () => {
     expect(screen.getByText('customer-a')).toBeInTheDocument()
     expect(screen.getByText('consume_spike')).toBeInTheDocument()
     // skipped 必须一起显示，否则「没有发现」与「没有检测」看起来一样。
+    // 明细默认折叠（见下一条用例），所以先展开 —— 展开动作本身也被这条断言钉住。
+    await userEvent.click(
+      screen.getByRole('button', { name: /could not be judged/ })
+    )
     expect(screen.getByText(/9008/)).toBeInTheDocument()
     // PRD 边界 case：`hours` 超上限时后端钳制返回，页面必须显示**实际使用**的窗口
-    // （这里是后端报的 24 小时 / 10 分钟窗口），否则运维者以为看的是他请求的范围。
+    // （这里是后端报的 7 小时 / 3 分钟窗口），否则运维者以为看的是他请求的范围。
     // 用正则而不是整串精确匹配：这一段与「上次扫描时间」同在 `<p>` 里。
+    // 断言里的 7 / 3 都**不是**系统默认值，所以把组件改动成写死 24/10 会让它红。
     expect(
-      screen.getByText(/Scanning the last 24 hours in 10-minute windows/)
+      screen.getByText(/Scanning the last 7 hours in 3-minute windows/)
     ).toBeInTheDocument()
+  })
+
+  test('folds the skipped detail once it grows to one entry per active token', async () => {
+    useProductionShape()
+    mocks.getAbuseAlerts.mockResolvedValue({
+      hours: 7,
+      windowMinutes: 3,
+      generatedAt: 1790000000,
+      baselineReady: true,
+      baselineReadyAt: 0,
+      lastScheduledScanAt: 1789999700,
+      notifyChannelReady: true,
+      logRetention: {
+        retentionDays: 30,
+        requiredMinutes: 70,
+        requiredHours: 24,
+        sufficient: true,
+      },
+      findings: [],
+      // 60 个健康令牌各得一条 `error_rate_spike` skip（门收紧后的常态）。
+      skipped: Array.from({ length: 60 }, (_, index) => ({
+        rule: 'error_rate_spike',
+        tokenId: 8000 + index,
+        reason: 'insufficient_baseline',
+      })),
+      excludedSaturatedRows: 0,
+    })
+    renderSection()
+
+    // 计数不能藏在展开之后：60 个令牌实测把 2937 字符拼进一个 `<p>`，
+    // 「有多少条」本身就是「检测过但没有结论」的结论。
+    const trigger = await screen.findByRole('button', {
+      name: /could not be judged \(baseline not ready\): 60/,
+    })
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText(/8000/)).toBeNull()
+
+    // 折叠不是抹掉：展开后首尾两条明细都必须在，一条不少。
+    await userEvent.click(trigger)
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText(/8000/)).toBeInTheDocument()
+    expect(screen.getByText(/8059/)).toBeInTheDocument()
   })
 })

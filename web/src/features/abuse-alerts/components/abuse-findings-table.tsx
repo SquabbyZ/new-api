@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -23,6 +24,12 @@ import {
   type StaticDataTableColumn,
 } from '@/components/data-table'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatNumber } from '@/lib/format'
 
@@ -147,19 +154,37 @@ export function AbuseFindingsTable(props: {
           })}
         </p>
         {props.skipped.length > 0 ? (
-          <div>
-            <p>
+          // 明细折叠、计数不折叠。健康令牌普遍会各得一条 `error_rate_spike` skip，
+          // 所以条目数与活跃令牌数同阶：60 个令牌实测把 2937 字符拼进一个 `<p>`，
+          // 一堵文字墙恰恰妨碍「看清」。计数（触发按钮上的文案）始终可见 ——
+          // 如实报告不等于一次全摊开，展开后明细必须齐全。
+          <Collapsible>
+            <CollapsibleTrigger
+              render={
+                <Button
+                  variant='ghost'
+                  size='sm'
+                  className='group h-auto gap-1 px-1 py-1 text-xs'
+                />
+              }
+            >
               {t(
                 'Tokens that were scanned but could not be judged (baseline not ready): {{value}}',
                 { value: formatNumber(props.skipped.length, locale) }
               )}
-            </p>
-            <p>
-              {props.skipped
-                .map((skip) => `${skip.rule} #${skip.tokenId} (${skip.reason})`)
-                .join(' · ')}
-            </p>
-          </div>
+              <ChevronDown
+                className='size-3 transition-transform group-aria-expanded:rotate-180'
+                aria-hidden='true'
+              />
+            </CollapsibleTrigger>
+            <CollapsibleContent>
+              <p className='pt-1'>
+                {props.skipped
+                  .map((skip) => `${skip.rule} #${skip.tokenId} (${skip.reason})`)
+                  .join(' · ')}
+              </p>
+            </CollapsibleContent>
+          </Collapsible>
         ) : null}
       </div>
     </div>
