@@ -134,6 +134,21 @@ func GetOptions(c *gin.Context) {
 		Key:   "ErrorLogMap",
 		Value: string(errorLogMap),
 	})
+	// 异常用量告警的规则映射表：同样只由后端产出。基线就绪状态与日志保留期也在这里
+	// 一并下发，页面顶部据此显示提示条 —— 否则「还没积累够基线」与「已经看过、没有
+	// 异常」在页面上长得一模一样，而这两件事的处置完全不同。
+	baselineReady, baselineReadyAt := model.AbuseAlertBaselineStatus()
+	abuseAlertMap, err := common.Marshal(operation_setting.BuildAbuseAlertMapPayload(
+		common.GetTimestamp(), baselineReady, baselineReadyAt, model.ClickHouseLogTTLDays(),
+	))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": err.Error()})
+		return
+	}
+	options = append(options, &model.Option{
+		Key:   "AbuseAlertMap",
+		Value: string(abuseAlertMap),
+	})
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",

@@ -328,6 +328,13 @@ func SetApiRouter(router *gin.Engine) {
 			systemTaskRoute.GET("/current", controller.GetCurrentSystemTask)
 			systemTaskRoute.GET("/:task_id", controller.GetSystemTask)
 		}
+		// 异常用量告警的只读发现端点。与 /system-task/* 同组、同鉴权等级：
+		// root 才可见，鉴权中间件链一字不改（本 slice 不涉及任何认证流程）。
+		abuseAlertRoute := apiRouter.Group("/abuse-alerts")
+		abuseAlertRoute.Use(middleware.RootAuth())
+		{
+			abuseAlertRoute.GET("/", controller.GetAbuseAlerts)
+		}
 		systemInfoRoute := apiRouter.Group("/system-info")
 		systemInfoRoute.Use(middleware.RootAuth())
 		{

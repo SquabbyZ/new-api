@@ -21,6 +21,9 @@ const (
 	SystemTaskTypeModelUpdate    = "model_update"
 	SystemTaskTypeMidjourneyPoll = "midjourney_poll"
 	SystemTaskTypeAsyncTaskPoll  = "async_task_poll"
+	// SystemTaskTypeAbuseScan 是异常用量告警的后台扫描。它沿用框架既有的租约去重、
+	// master-only 执行与运行历史，因此本 slice 不自建第二套去重。
+	SystemTaskTypeAbuseScan = "abuse_scan"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")

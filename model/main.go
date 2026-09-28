@@ -503,6 +503,13 @@ func ensureClickHouseLogSkippingIndexes() error {
 	return nil
 }
 
+// ClickHouseLogTTLDays 返回日志库当前的 ClickHouse TTL（天，0 = 不设 TTL）。
+// 它是 Q2 那个「保留期短于检测需求」提示的唯一数据源：保留期比基线窗还短时，
+// 基线永远读不满，检测会一直停在 insufficient_baseline —— 那必须让运维者看得见。
+func ClickHouseLogTTLDays() int {
+	return clickHouseLogTTLDays()
+}
+
 func clickHouseLogTTLDays() int {
 	ttlDays := common.GetEnvOrDefault("LOG_SQL_CLICKHOUSE_TTL_DAYS", 0)
 	if ttlDays < 0 {

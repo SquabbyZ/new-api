@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { AbuseAlertsSection } from '@/features/abuse-alerts'
 import { ErrorLogRulesSection } from '@/features/error-log-rules'
 
 import { SystemBehaviorSection } from '../general/system-behavior-section'
@@ -107,6 +108,11 @@ const OPERATIONS_SECTIONS = [
     id: 'error-logs',
     titleKey: 'Error Log Rules',
     build: () => <ErrorLogRulesSection />,
+  },
+  {
+    id: 'abuse-alerts',
+    titleKey: 'Abuse Alerts',
+    build: () => <AbuseAlertsSection />,
   },
   {
     id: 'performance',

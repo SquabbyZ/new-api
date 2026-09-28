@@ -240,6 +240,9 @@ func validateOptionValue(key string, value string) error {
 	if key == "MaxTokenAutoGroups" {
 		return setting.ValidateMaxTokenAutoGroups(value)
 	}
+	if err := operation_setting.ValidateAbuseAlertOption(key, value); err != nil {
+		return err
+	}
 	return nil
 }
 

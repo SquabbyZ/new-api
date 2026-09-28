@@ -19,6 +19,14 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  "Consume rate spike",
+  "Request rate spike",
+  "Failure rate spike (after a channel is selected)",
+  "Model first seen",
+  "Source anomaly (new IP / ASN / region)",
+  "Concurrency anomaly (one token from many sources)",
+  "Not computable: request IP is stored only when the token owner enables the record_ip_log privacy setting, and relay requests are never written to audit_logs. No ASN or region is recorded anywhere.",
+  "Not computable: judging \"multiple sources\" needs a source identifier, which is the same missing IP. The system also keeps no per-token in-flight tracking; the only per-request rate limit is keyed by user, not by token, and IP allow-list rejections are not recorded.",
   'Task usage metadata is unavailable. Pricing details cannot be displayed.',
   'This expression cannot be expanded into a price table. View the original expression below.',
   'This operation is only supported for vLLM or SGLang channels',
