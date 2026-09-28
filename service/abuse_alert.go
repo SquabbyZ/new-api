@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -217,18 +218,35 @@ func notifyAbuseAlertFindings(report AbuseAlertReport) bool {
 
 // abuseAlertFindingLine 渲染一条发现。缺失的令牌/用户名显示成 deleted，
 // 不隐藏该行，也不显示任何凭据。
+//
+// **用户可控字段必须在这里做 HTML 转义（S3）**：令牌名只校验长度
+// （controller/token.go 的 `len(token.Name) > 50`），用户名同理，模型名来自客户端
+// 请求的 model —— 三者都是普通账号可控的。而这条正文经 NotifyRootUser →
+// sendEmailNotify → common.SendEmail 发出，Content-Type 是 **text/html**
+// （common/email.go），于是未转义时任何用户都能往 root 的告警邮件里塞一段 HTML
+// （伪造文案、外链、隐藏文字）。
+//
+// 修法选在这里、而不是改通知设施：`common.SendEmail` / `NotifyUser` 是所有通知
+// 共用的，动它们会改到别的调用方的正文（例如给既有邮件加一层转义或换掉
+// Content-Type）。本函数是这条推送**唯一**的正文构造点，且只有一个调用方
+// （notifyAbuseAlertFindings），所以转义落在这里影响面为零。
+//
+// 代价如实记录：webhook / Bark / Gotify 收到的是同一份正文，名字里含
+// `& < > " '` 时那些通道会看到 HTML 实体（不转义的名字逐字节不变）。
+// 用一个字符串同时满足 HTML 与纯文本两个上下文是有取舍的，这里选的是
+// 「宁可多一个实体，不可让用户文本被当成标记解释」。
 func abuseAlertFindingLine(finding AbuseAlertFindingPayload) string {
-	tokenName := finding.TokenName
+	tokenName := html.EscapeString(finding.TokenName)
 	if tokenName == "" {
 		tokenName = fmt.Sprintf("#%d (deleted)", finding.TokenID)
 	}
-	username := finding.Username
+	username := html.EscapeString(finding.Username)
 	if username == "" {
 		username = fmt.Sprintf("#%d (deleted)", finding.UserID)
 	}
 	target := fmt.Sprintf("token %s of user %s", tokenName, username)
 	if finding.ModelName != nil {
-		target = fmt.Sprintf("%s (model %s)", target, *finding.ModelName)
+		target = fmt.Sprintf("%s (model %s)", target, html.EscapeString(*finding.ModelName))
 	}
 	return fmt.Sprintf(
 		"- [%s] %s: %s=%.2f vs baseline median %.2f (ratio %.2f, %s), window %s",

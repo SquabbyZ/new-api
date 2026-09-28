@@ -115,6 +115,9 @@ const abuseAlertSaturatedKey = "quota_saturation"
 const abuseAlertSaturatedMarker = `%"` + abuseAlertSaturatedKey + `":%`
 
 // abuseAlertBaselineQueryTimeout 是伪键路径上那次基线探测的超时。
+//
+// 它不只是交给驱动的 ctx 期限：AbuseAlertBaselineStatus 用它同时也做**收结果的
+// 期限**，因为驱动在建立连接时的读超时取自自己的选项（实测 30s），并不理会这个 ctx。
 const abuseAlertBaselineQueryTimeout = 3 * time.Second
 
 // abuseAlertMaxSpanSeconds 返回单次扫描允许的最大跨度。
@@ -280,11 +283,28 @@ func queryAbuseAlertModels(ctx context.Context, rangeStart int64, rangeEnd int64
 	return rows, nil
 }
 
+// abuseAlertBaselineProbeResult 是一条探针结果。用结构体而不是两个裸值送达，
+// 因为 channel 一次只能送一个值。
+type abuseAlertBaselineProbeResult struct {
+	ready   bool
+	readyAt int64
+}
+
 // AbuseAlertBaselineStatus 返回当前系统是否已积累足够的基线，以及预计就绪时间
 // （0 = 现在还无法预计，例如日志库读不到）。
 //
 // 它被 GET /api/option/ 调用，所以**必须**失败软处理并且有超时：一个日志库抖动
 // 不应该让整个设置页打不开，更不应该让请求挂在那里。
+//
+// 「有超时」必须由**本函数**保证，不能只靠 ctx：实测（P1，日志库接受 TCP 但永不应答）
+// ctx 的 3s 被驱动的自有读超时盖过 —— 查询真正耗时 30.009s，于是设置页真就在那里挂
+// 30 秒，与上面那句注释说的相反。原因是连接握手的读超时取自驱动选项而不是查询 ctx。
+// 所以这里把结果收在一个**带缓冲**的 channel 上，到点就返回 (false, 0)，不等驱动。
+//
+// 代价如实记录：被放弃的那一次尝试会自己在驱动的超时（实测约 30s）后结束，期间占用
+// 一个后台 goroutine 与一次连接尝试；它不写任何状态、不会被重试。调用频率由设置页的
+// staleTime（5 分钟）与 root-only 访问限住，因此并存的尝试至多是「一条」这个量级。
+// 不去改驱动的 dial/read 超时：那是全部日志库调用共享的接线，不属本 slice 的范围。
 func AbuseAlertBaselineStatus() (bool, int64) {
 	if LOG_DB == nil {
 		return false, 0
@@ -296,7 +316,21 @@ func AbuseAlertBaselineStatus() (bool, int64) {
 	nowUnix := time.Now().Unix()
 	currentEnd := nowUnix - nowUnix%windowSeconds
 	windowRangeStart := currentEnd - windowSeconds - int64(operation_setting.AbuseAlertBaselineWindows())*windowSeconds
-	return abuseAlertBaselineStatus(ctx, nowUnix, windowRangeStart, windowSeconds)
+
+	// 带缓冲（容量 1）：即使我们已经放弃等待，探针也一定能把结果放进去并退出，
+	// 不会永久阻塞在发送上。
+	probe := make(chan abuseAlertBaselineProbeResult, 1)
+	go func() {
+		ready, readyAt := abuseAlertBaselineStatus(ctx, nowUnix, windowRangeStart, windowSeconds)
+		probe <- abuseAlertBaselineProbeResult{ready: ready, readyAt: readyAt}
+	}()
+
+	select {
+	case result := <-probe:
+		return result.ready, result.readyAt
+	case <-ctx.Done():
+		return false, 0
+	}
 }
 
 // abuseAlertBaselineStatus 判断日志库是否已经积累了足够的基线。

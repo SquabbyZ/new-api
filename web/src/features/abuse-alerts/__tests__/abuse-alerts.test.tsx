@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import i18n from 'i18next'
 import { initReactI18next, I18nextProvider } from 'react-i18next'
@@ -383,6 +383,21 @@ describe('AbuseAlertsSection', () => {
     expect(
       screen.getByText(/Scanning the last 7 hours in 3-minute windows/)
     ).toBeInTheDocument()
+  })
+
+  test('starts the scan on open, without waiting for a click', async () => {
+    useProductionShape()
+    mocks.getAbuseAlerts.mockClear()
+
+    renderSection()
+
+    // P2：代码与注释曾相互矛盾 —— 注释写「首次渲染不自动跑」，而 query 的
+    // `enabled: abuseAlertMap !== null` 没有任何门控，打开页面就真的扫一次。
+    // 本轮把**代码**这一侧定为事实（本页是发现的完整记录，打开就必须有数据；
+    // 打开只看到转不完的加载态，与「已经看过、没有异常」无法区分）。
+    // 把 enabled 改回 false，或改成必须先点「Refresh findings」才取，这条就会红。
+    await waitFor(() => expect(mocks.getAbuseAlerts).toHaveBeenCalledTimes(1))
+    expect(mocks.getAbuseAlerts).toHaveBeenCalledWith(0)
   })
 
   test('folds the skipped detail once it grows to one entry per active token', async () => {

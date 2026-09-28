@@ -96,6 +96,25 @@ const (
 	abuseAlertMaxEndpointHoursCeiling = 24
 )
 
+// min_* 一族的上界（S1）。这一族是「一个窗口内至少要有多少事件」的**地板**，
+// 语义是抑制噪音，不是流量目标：地板高到没有任何令牌能达到时，规则不是「变严」，
+// 而是被**静默关闭** —— min_baseline_requests 更糟，它还会让基线门恒不成立，
+// 于是四条规则一起停摆，而 API 一律报 insufficient_baseline（读起来像「基线还在
+// 积累」，撒谎的是展示层）。与 D3 同族：同一个「maxValue == 0 表示无界」的写法
+// 被复用在这一族的每一个键上，所以这里一次性给全族补上界。
+//
+// 上界 = 各自内置默认值的 AbuseAlertMinFloorCeilingMultiplier 倍：既有的合法配置
+// （默认值上下）全部落在区间内，而越界值只能靠**显式写一个荒谬的大数**到达，
+// 一次手滑不再可能把检测全关。倍数写成常量、上界由默认值推导，避免两处漂移。
+const (
+	AbuseAlertMinFloorCeilingMultiplier = 100
+
+	AbuseAlertMaxMinBaselineRequests = abuseAlertDefaultMinBaselineRequest * AbuseAlertMinFloorCeilingMultiplier
+	AbuseAlertMaxMinRequests         = abuseAlertDefaultMinRequests * AbuseAlertMinFloorCeilingMultiplier
+	AbuseAlertMaxMinErrors           = abuseAlertDefaultMinErrors * AbuseAlertMinFloorCeilingMultiplier
+	AbuseAlertMaxMinConsumeQuota     = abuseAlertDefaultMinConsumeQuota * AbuseAlertMinFloorCeilingMultiplier
+)
+
 // 内置默认值。三态字段为 nil 时取这里的值。
 const (
 	abuseAlertDefaultEnabled            = true
@@ -547,9 +566,11 @@ func ValidateAbuseAlertOption(key string, value string) error {
 	case "new_model_lookback_hours":
 		return checkAbuseAlertIntRange(key, value, AbuseAlertMinLookbackHours, AbuseAlertMaxLookbackHours, nil)
 	case "min_baseline_requests":
-		return checkAbuseAlertIntRange(key, value, 0, 0, nil)
-	case "min_requests", "min_errors":
-		return checkAbuseAlertIntRange(key, value, 0, 0, nil)
+		return checkAbuseAlertIntRange(key, value, 0, AbuseAlertMaxMinBaselineRequests, nil)
+	case "min_requests":
+		return checkAbuseAlertIntRange(key, value, 0, AbuseAlertMaxMinRequests, nil)
+	case "min_errors":
+		return checkAbuseAlertIntRange(key, value, 0, AbuseAlertMaxMinErrors, nil)
 	case "min_consume_quota":
 		parsed, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
@@ -557,6 +578,9 @@ func ValidateAbuseAlertOption(key string, value string) error {
 		}
 		if parsed < 0 {
 			return fmt.Errorf("%s must not be negative", key)
+		}
+		if parsed > AbuseAlertMaxMinConsumeQuota {
+			return fmt.Errorf("%s must be at most %d", key, AbuseAlertMaxMinConsumeQuota)
 		}
 	case "consume_ratio", "request_ratio", "error_rate_ratio":
 		parsed, err := strconv.ParseFloat(value, 64)
@@ -576,7 +600,10 @@ func ValidateAbuseAlertOption(key string, value string) error {
 }
 
 // checkAbuseAlertIntRange 解析并校验一个整数键；extra 为 nil 表示只校验范围。
-// max 为 0 表示无上界。
+//
+// maxValue 必须是**真实的上界**：这个校验器里不再有「无界」这种写法。
+// 旧签名把 `maxValue == 0` 当「无上界」，而 min_* 一族四个键全都这么传，
+// 于是一族旋钮集体无界（S1）—— 写坏一颗就能让四条规则静默全关。
 func checkAbuseAlertIntRange(key string, value string, minValue int, maxValue int, extra func(int) error) error {
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
@@ -585,7 +612,7 @@ func checkAbuseAlertIntRange(key string, value string, minValue int, maxValue in
 	if parsed < minValue {
 		return fmt.Errorf("%s must be at least %d", key, minValue)
 	}
-	if maxValue > 0 && parsed > maxValue {
+	if parsed > maxValue {
 		return fmt.Errorf("%s must be at most %d", key, maxValue)
 	}
 	if extra != nil {

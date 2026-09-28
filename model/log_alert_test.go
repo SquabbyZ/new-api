@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/clickhouse"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -118,6 +121,10 @@ func abuseFixtureWindows(now int64) ([]int64, int64) {
 
 // abuseFixtureRowsInWindow 生成一个窗口内的 rowsPerWindow 行，行内偏移严格落在窗口内
 // （不会溢出到下一个窗口），每行额度 quotaPerRow。
+//
+// 偏移取模夹在窗口内：rowsPerWindow > 窗口秒数时 step 被夹到 1，裸偏移会溢出到**下一个
+// 窗口**（那里是同一令牌的另一个桶），于是「每窗 N 行」的造数变成假的。
+// rowsPerWindow ≤ 窗口秒数时 i*step < 窗口秒数，取模是恒等操作。
 func abuseFixtureRowsInWindow(tokenID int32, window int64, rowsPerWindow int, quotaPerRow int64, logType int) []abuseFixtureRow {
 	rows := make([]abuseFixtureRow, 0, rowsPerWindow)
 	step := int64(abuseFixtureWindowSeconds) / int64(rowsPerWindow)
@@ -127,7 +134,7 @@ func abuseFixtureRowsInWindow(tokenID int32, window int64, rowsPerWindow int, qu
 	for i := range rowsPerWindow {
 		rows = append(rows, abuseFixtureRow{
 			TokenID:   tokenID,
-			CreatedAt: window + int64(i)*step,
+			CreatedAt: window + (int64(i)*step)%abuseFixtureWindowSeconds,
 			Type:      logType,
 			Quota:     quotaPerRow,
 			ModelName: "gpt-4o",
@@ -504,6 +511,23 @@ func TestValidateAbuseAlertOptionRejectsOutOfRangeValues(t *testing.T) {
 		{name: "a ratio below 1", key: "abuse_alert_setting.consume_ratio", value: "0.5"},
 		{name: "a negative request floor", key: "abuse_alert_setting.min_requests", value: "-1"},
 		{name: "a negative quota floor", key: "abuse_alert_setting.min_consume_quota", value: "-1"},
+		// S1：min_* 一族是「一个窗口内至少要有多少事件」的地板，地板高到没有任何
+		// 令牌能达到时，规则不是变严而是被**静默关闭** —— 收尾评审实测
+		// min_baseline_requests=1000000000 经生产 UpdateOption 写入后，一个每基线窗
+		// 1000 次请求的令牌基线门仍为 false，四条规则一起停摆而 API 只报
+		// insufficient_baseline。这四行是那次探针的值，修复前全部 NoError。
+		// 边界两侧都钉住：上界本身必须被接受（正控制在下一个用例），越界一个数就必须被拒。
+		{name: "the baseline request floor may not be unbounded", key: "abuse_alert_setting.min_baseline_requests", value: "1000000000"},
+		{name: "the baseline request floor may not be the int64 maximum", key: "abuse_alert_setting.min_baseline_requests", value: "9223372036854775807"},
+		{name: "baseline request floor above the ceiling", key: "abuse_alert_setting.min_baseline_requests", value: "1001"},
+		{name: "baseline request floor exactly at the ceiling", key: "abuse_alert_setting.min_baseline_requests", value: "1000", ok: true},
+		{name: "request floor above the ceiling", key: "abuse_alert_setting.min_requests", value: "5001"},
+		{name: "request floor exactly at the ceiling", key: "abuse_alert_setting.min_requests", value: "5000", ok: true},
+		{name: "error floor above the ceiling", key: "abuse_alert_setting.min_errors", value: "2001"},
+		{name: "error floor exactly at the ceiling", key: "abuse_alert_setting.min_errors", value: "2000", ok: true},
+		{name: "the quota floor may not be unbounded", key: "abuse_alert_setting.min_consume_quota", value: "9223372036854775807"},
+		{name: "quota floor above the ceiling", key: "abuse_alert_setting.min_consume_quota", value: "50000001"},
+		{name: "quota floor exactly at the ceiling", key: "abuse_alert_setting.min_consume_quota", value: "50000000", ok: true},
 		{name: "lookback above the upper bound", key: "abuse_alert_setting.new_model_lookback_hours", value: "169"},
 		{name: "lookback below the lower bound", key: "abuse_alert_setting.new_model_lookback_hours", value: "0"},
 		{name: "an unknown key in this module", key: "abuse_alert_setting.not_a_field", value: "1"},
@@ -572,6 +596,110 @@ func abuseDialectExpectedAggregates(rows []abuseFixtureRow) abuseDialectAggregat
 	}
 	out.Rows = len(buckets)
 	return out
+}
+
+// TestAbuseAlertFloorCeilingsStillAllowDetection 是 S1 的**正控制**：把
+// min_baseline_requests 写到校验器允许的**最大值**，一个真的达到该地板的令牌必须
+// 照常被检出。只断言越界值被拒，区分不出「合理上界」与「上界低到把合法配置也挡住」；
+// 这条用例把合法极值那一侧钉住。
+func TestAbuseAlertFloorCeilingsStillAllowDetection(t *testing.T) {
+	db := withAbuseAlertClickHouseLogDB(t)
+	restoreAbuseAlertOptionDB(t)
+
+	ceiling := operation_setting.AbuseAlertMaxMinBaselineRequests
+	// 走生产写入路径：既要证明这个值被接受，也要证明它真的进了判定。
+	require.NoError(t, UpdateOption("abuse_alert_setting.min_baseline_requests", strconv.Itoa(ceiling)),
+		"S1 positive control setup: the largest accepted min_baseline_requests must be writable")
+	require.Equal(t, ceiling, operation_setting.AbuseAlertMinBaselineRequests(),
+		"S1 positive control setup: the written floor must be the one the detector reads")
+
+	now := time.Now().Unix()
+	windows, currentStart := abuseFixtureWindows(now)
+	baseline := windows[:abuseFixtureBaselineWins]
+
+	rows := make([]abuseFixtureRow, 0, 8192)
+	// 9101 恰好在地板上：每个基线窗 ceiling 次请求，当前窗额度 10× 中位数。
+	rows = append(rows, abuseFixtureRowsInWindows(9101, baseline, ceiling, 1000, LogTypeConsume)...)
+	rows = append(rows, abuseFixtureRowsInWindow(9101, currentStart, 10, 1000000, LogTypeConsume)...)
+	// 9102 差一次：每个基线窗 ceiling-1 次请求。门必须仍然挡住它。
+	rows = append(rows, abuseFixtureRowsInWindows(9102, baseline, ceiling-1, 1000, LogTypeConsume)...)
+	rows = append(rows, abuseFixtureRowsInWindow(9102, currentStart, 10, 1000000, LogTypeConsume)...)
+	insertAbuseFixtureRows(t, db, rows)
+
+	result := scanAbuseFixture(t, now)
+
+	assert.True(t, hasAbuseFinding(result, operation_setting.AbuseRuleConsumeSpike, 9101),
+		"S1 positive control FAILED [assertion: a token whose baseline windows each carry exactly "+
+			"AbuseAlertMaxMinBaselineRequests requests must still fire consume_spike]: the ceiling "+
+			"is set so low that a legitimate configuration can no longer be judged (findings=%v)", result.Findings)
+	assert.False(t, hasAbuseFinding(result, operation_setting.AbuseRuleConsumeSpike, 9102),
+		"S1 positive control FAILED [assertion: one request below the floor must not be judged]: "+
+			"the gate is not actually reading min_baseline_requests")
+	assert.True(t, hasAbuseSkip(result, operation_setting.AbuseRuleConsumeSpike, 9102, AbuseAlertSkipInsufficientBaseline),
+		"S1 positive control FAILED [assertion: the token below the floor must be reported as "+
+			"insufficient_baseline instead of vanishing]: a threshold that silently drops tokens "+
+			"is exactly the failure S1 is about")
+}
+
+// TestAbuseAlertBaselineStatusDoesNotOutliveItsTimeout 是 P1 的回归断言。
+//
+// 伪键路径上的那次基线探测被 GET /api/option/ 无条件调用，所以整个设置页的延迟挂在
+// 它身上。它的失败软处理（返回 (false,0) 而不是报错）只解决「失败」不解决「多久失败」：
+// 实测日志库**接受 TCP 但永不应答**时，ctx 的 3s 被驱动自有的读超时（约 30s）盖过，
+// 请求就在那里挂了 30 秒 —— 与代码里「不应该让请求挂在那里」那句注释相反。
+//
+// 断言用 10s 而不是 3s：要区分的是「3s 的常量期限」与「驱动的 30s 读超时」这两个量级，
+// 中间留足余量，避免把这条用例变成对机器速度的断言。
+func TestAbuseAlertBaselineStatusDoesNotOutliveItsTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+
+	// 接受连接后不读不写也不关：这就是「日志库不应答」的忠实形态。连接必须保活
+	// （留在 channel 里可达），否则 GC 的 finalizer 会把它关掉，场景就变成连接被拒。
+	held := make(chan net.Conn, 16)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			held <- conn
+		}
+	}()
+
+	db, err := gorm.Open(
+		clickhouse.New(clickhouse.Config{
+			DSN:                       "clickhouse://default:peakstest@" + listener.Addr().String() + "/default",
+			SkipInitializeWithVersion: true,
+		}),
+		&gorm.Config{DisableAutomaticPing: true},
+	)
+	require.NoError(t, err)
+
+	previousLogDB, previousType := LOG_DB, common.LogDatabaseType()
+	LOG_DB = db
+	common.SetLogDatabaseType(common.DatabaseTypeClickHouse)
+	t.Cleanup(func() {
+		LOG_DB = previousLogDB
+		common.SetLogDatabaseType(previousType)
+		if sqlDB, dbErr := db.DB(); dbErr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+
+	start := time.Now()
+	ready, readyAt := AbuseAlertBaselineStatus()
+	elapsed := time.Since(start)
+
+	assert.Less(t, elapsed, 10*time.Second,
+		"P1 FAILED [assertion: a log database that accepts the connection and never answers "+
+			"must not hold GET /api/option/ longer than the accessor's own timeout]: "+
+			"elapsed=%s, which is the driver's read timeout rather than the caller's budget", elapsed)
+	assert.False(t, ready,
+		"P1 FAILED [assertion: an unanswered probe must report \"no baseline\" rather than a verdict]")
+	assert.Zero(t, readyAt,
+		"P1 FAILED [assertion: an unanswered probe must not invent a readiness timestamp]")
 }
 
 // TestAbuseAlertSaturatedMarkerMatchesTheStoredShape 是 AC-7 的**接线证明**：
@@ -726,6 +854,7 @@ CREATE TABLE abuse_alert_probe_logs (
 var abuseAlertOptionKeys = []string{
 	"abuse_alert_setting.rule_consume_spike_enabled",
 	"abuse_alert_setting.consume_ratio",
+	"abuse_alert_setting.min_baseline_requests",
 }
 
 // restoreAbuseAlertOptionDB 给变异用例准备一个可写的主库 + OptionMap 快照。

@@ -63,8 +63,16 @@ export function AbuseAlertsSection() {
 
   const abuseAlertMap = parseAbuseAlertMap(optionsQuery.data?.data)
 
-  // 这一条是只读的：它不写任何状态，也不发通知。首次渲染不自动跑，
-  // 因为它会对日志库做一次真实扫描。
+  // 伪键到达后这条查询**自动执行**，不等运维者点「刷新」。
+  //
+  // 代码此前与注释相反（注释写「首次渲染不自动跑」），本轮把**代码**定为正确的一侧：
+  // 本页是发现的完整记录（PRD §R6），打开却什么都不扫，运维者只会看到一个永远转不完
+  // 的加载态 —— 而「已经看过、没有异常」与「什么都没看」在页面上长得一样，正是这个
+  // 页面反复要挡的那件事。
+  //
+  // 代价有界，且都是既有设计已经限住的：一次扫描最多 3 条日志库查询；查询异步执行、
+  // 不阻塞渲染；staleTime 30s + refetchOnWindowFocus:false ⇒ 一次打开最多扫一次；
+  // 只读（不写状态、不发通知）。
   const reportQuery = useQuery({
     queryKey: ['abuse-alerts', 'report'],
     queryFn: () => getAbuseAlerts(0),
